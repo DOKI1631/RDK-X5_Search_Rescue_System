@@ -1,0 +1,21 @@
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 操作系统及 IDE 缓存
+.DS_Store
+.vscode/
+.idea/
+
+# 运行日志和临时文件
+*.log
+*.mp4
+*.jpg
+*.png
+!assets/  # 允许 assets 文件夹内的图片上传
+
+# 模型权重大文件（通常不建议直接传 git，可在 README 提供网盘链接）
+*.bin
+*.onnx
