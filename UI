@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>基于RDKX5的视觉云台地震灾区搜救系统</title>
+    <style>
+        :root {
+            --primary-color: #00e5ff;
+            --bg-gradient: linear-gradient(135deg, #0b101e 0%, #1a2639 100%);
+            --glass-bg: rgba(255, 255, 255, 0.04);
+            --glass-border: rgba(255, 255, 255, 0.08);
+            --panel-bg: rgba(11, 16, 30, 0.75);
+            --alert-color: #ff3333;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+        }
+
+        body {
+            background: var(--bg-gradient);
+            color: #ffffff;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .screen {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            display: flex;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.5s ease, visibility 0.5s ease;
+        }
+
+        .screen.active {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        /* ===== 欢迎页 ===== */
+        #screen1 {
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            background-image:
+                radial-gradient(circle at 50% 50%, rgba(0, 229, 255, 0.1) 0%, transparent 60%),
+                var(--bg-gradient);
+        }
+
+        .title-container {
+            text-align: center;
+            margin-bottom: 60px;
+            animation: fadeInDown 1s ease-out;
+        }
+
+        h1 {
+            font-size: 3rem;
+            font-weight: 600;
+            letter-spacing: 4px;
+            text-shadow: 0 0 20px rgba(0, 229, 255, 0.4);
+            margin-bottom: 15px;
+        }
+
+        .subtitle {
+            font-size: 1.2rem;
+            color: #8bb4c7;
+            letter-spacing: 2px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(90deg, #00b4db 0%, #0083b0 100%);
+            color: white;
+            font-size: 1.5rem;
+            padding: 16px 48px;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            box-shadow: 0 10px 30px rgba(0, 180, 219, 0.4);
+            transition: all 0.3s ease;
+            animation: fadeInUp 1s ease-out 0.3s both;
+            letter-spacing: 2px;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-3px) scale(1.05);
+            box-shadow: 0 15px 40px rgba(0, 180, 219, 0.6);
+        }
+
+        /* ===== ⭐ 核心升级：视频监控工作站（横向高级布局） ===== */
+        #screen2 {
+            flex-direction: row; /* 双栏横向排布，不挤压视频区 */
+            background-color: #040812;
+        }
+
+        /* 左侧全大屏视频监控区 */
+        .video-workspace {
+            flex: 1.3;
+            height: 100%;
+            position: relative;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: #000;
+        }
+
+        #videoStream {
+            width: 100%;
+            height: 100%;
+            object-fit: contain; /* 保证 1:1 的 YOLO 数据不形变 */
+            display: none;
+        }
+
+        .loading-text {
+            position: absolute;
+            font-size: 1.5rem;
+            color: var(--primary-color);
+            letter-spacing: 2px;
+            animation: pulse 1.5s infinite;
+        }
+
+        /* 视频内悬浮底部控制器 */
+        .floating-controls {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--glass-border);
+            padding: 12px 25px;
+            border-radius: 30px;
+            display: flex;
+            gap: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+            z-index: 10;
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.08);
+            color: #fff;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            padding: 10px 22px;
+            font-size: 0.95rem;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .btn-secondary:hover { background: rgba(255, 255, 255, 0.18); }
+        #backBtn:hover { background: rgba(220, 53, 69, 0.8); border-color: transparent; }
+
+        /* 右侧边缘数据&事件记录侧边栏 */
+        .side-dashboard {
+            flex: 0.7;
+            height: 100%;
+            background: var(--panel-bg);
+            border-left: 1px solid var(--glass-border);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            padding: 25px;
+            display: flex;
+            flex-direction: column;
+            gap: 25px;
+            box-sizing: border-box;
+            z-index: 5;
+        }
+
+        /* 侧边栏内部区块 */
+        .dashboard-section h3 {
+            color: var(--primary-color);
+            border-left: 3px solid var(--primary-color);
+            padding-left: 10px;
+            margin-bottom: 15px;
+            font-size: 1.05rem;
+            letter-spacing: 1px;
+        }
+
+        /* ⭐ 实时高亮数字时钟样式 */
+        .clock-card {
+            background: rgba(0, 229, 255, 0.05);
+            border: 1px solid rgba(0, 229, 255, 0.15);
+            border-radius: 8px;
+            padding: 15px;
+            text-align: center;
+        }
+        .clock-card label { display: block; color: #517185; font-size: 11px; margin-bottom: 4px; letter-spacing: 1px;}
+        .clock-card span { 
+            font-size: 1.4rem; 
+            font-weight: bold; 
+            color: var(--primary-color);
+            font-family: 'Courier New', Courier, monospace;
+            text-shadow: 0 0 10px rgba(0, 229, 255, 0.3);
+        }
+
+        /* 节点状态网络参数网格 */
+        .status-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+        .status-card {
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            padding: 12px 15px;
+            border-radius: 8px;
+        }
+        .status-card label { display: block; color: #70859e; font-size: 11px; margin-bottom: 3px; }
+        .status-card span { font-size: 0.95rem; font-weight: 500; color: #e2e8f0; }
+
+        /* ⭐ 历史检测流瀑布式面板 */
+        .log-box-wrapper {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .log-container {
+            flex: 1;
+            background: rgba(0, 0, 0, 0.35);
+            border: 1px solid var(--glass-border);
+            border-radius: 8px;
+            padding: 12px;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 12px;
+            overflow-y: auto;
+            color: #cbd5e1;
+            line-height: 1.6;
+        }
+        .log-item {
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px dashed rgba(255,255,255,0.03);
+            animation: fadeIn 0.3s ease;
+        }
+        .log-time { color: #517185; margin-right: 8px; }
+        .log-danger { color: var(--alert-color); font-weight: bold; }
+        .log-normal { color: #8ba4c7; }
+
+        @keyframes fadeInDown {
+            from { opacity: 0; transform: translateY(-30px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(30px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes pulse {
+            0% { opacity: 0.5; } 50% { opacity: 1; } 100% { opacity: 0.5; }
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(5px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="screen1" class="screen active">
+        <div class="title-container">
+            <h1>基于RDKX5的视觉云台地震灾区搜救系统</h1>
+            <div class="subtitle">Vision-based PTZ Rescue System</div>
+        </div>
+        <button id="startImageBtn" class="btn-primary">开始图像</button>
+    </div>
+
+    <div id="screen2" class="screen">
+        <div class="video-workspace">
+            <div class="loading-text" id="loadingText">正在建立图传连接...</div>
+            <img id="videoStream" alt="RDK-X5 实时搜救画面">
+
+            <div class="floating-controls">
+                <button id="pauseBtn" class="btn-secondary">暂停画面</button>
+                <button id="backBtn" class="btn-secondary">结束任务 / 返回</button>
+            </div>
+        </div>
+
+        <div class="side-dashboard">
+            <div class="clock-card">
+                <label>SYSTEM LIVE TIME (MISSION CLOCK)</label>
+                <div id="liveClock">0000-00-00 00:00:00</div>
+            </div>
+
+            <div class="dashboard-section">
+                <h3>边缘计算节点状态</h3>
+                <div class="status-grid">
+                    <div class="status-card"><label>硬件算力核心</label><span>RDK-X5 BPU</span></div>
+                    <div class="status-card"><label>网络链路状态</label><span style="color:#00ff66;">ONLINE</span></div>
+                    <div class="status-card"><label>AI 推理模型</label><span>YOLO (640x640)</span></div>
+                    <div class="status-card"><label>云台交互交互</label><span>UART (0x05)</span></div>
+                </div>
+            </div>
+
+            <div class="log-box-wrapper">
+                <div class="dashboard-section">
+                    <h3>历史检测目标记录流</h3>
+                </div>
+                <div class="log-container" id="logBox">
+                    <div class="log-item"><span class="log-time">[SYSTEM]</span><span class="log-normal">感知引擎初始化完毕...</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ===== ⭐ 基础网络连接配置 =====
+        const BOARD_IP = "192.168.31.126"; // 对应你截图里的板子局域网 IP
+        const BOARD_PORT = 5000;
+        const STREAM_URL = `http://${BOARD_IP}:${BOARD_PORT}/video_feed`;
+        const CHECK_URL = `http://${BOARD_IP}:${BOARD_PORT}/check_detection`; // 高速数据反馈端点
+
+        const screen1 = document.getElementById('screen1');
+        const screen2 = document.getElementById('screen2');
+        const startImageBtn = document.getElementById('startImageBtn');
+        const backBtn = document.getElementById('backBtn');
+        const pauseBtn = document.getElementById('pauseBtn');
+        const videoStream = document.getElementById('videoStream');
+        const loadingText = document.getElementById('loadingText');
+        const logBox = document.getElementById('logBox');
+
+        let isPaused = false;
+        let checkInterval = null;
+        let logPollInterval = null;
+
+        // 1. ⭐ 实时高亮数字时钟驱动
+        function updateClock() {
+            const now = new Date();
+            const y = now.getFullYear();
+            const m = String(now.getMonth() + 1).padStart(2, '0');
+            const d = String(now.getDate()).padStart(2, '0');
+            const h = String(now.getHours()).padStart(2, '0');
+            const min = String(now.getMinutes()).padStart(2, '0');
+            const s = String(now.getSeconds()).padStart(2, '0');
+            document.getElementById('liveClock').innerText = `${y}-${m}-${d} ${h}:${min}:${s}`;
+        }
+        setInterval(updateClock, 1000);
+        updateClock();
+
+        // 2. ⭐ 弹动态时间戳历史日志事件的函数
+        function addLogEntry(type, message) {
+            const now = new Date();
+            const timeStr = now.toTimeString().split(' ')[0]; // hh:mm:ss
+            const item = document.createElement('div');
+            item.className = 'log-item';
+            
+            if (type === 'danger') {
+                item.innerHTML = `<span class="log-time">[${timeStr}]</span><span class="log-danger">🚨 ${message}</span>`;
+            } else {
+                item.innerHTML = `<span class="log-time">[${timeStr}]</span><span class="log-normal">➔ ${message}</span>`;
+            }
+            logBox.appendChild(item);
+            logBox.scrollTop = logBox.scrollHeight; // 新记录弹出来后，自动强制探底滚动
+        }
+
+        // 3. ⭐ 后端高速轻量级数据轮询（用于同步历史检测流）
+        let lastLoggedState = false;
+        function pollDetectionFromBoard() {
+            if (isPaused) return;
+            fetch(CHECK_URL)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.detected) {
+                        if (!lastLoggedState) {
+                            addLogEntry('danger', '警告：边缘计算感知到受困人员！');
+                            lastLoggedState = true; // 防抖，进入视野只记录一次
+                        }
+                    } else {
+                        lastLoggedState = false;
+                    }
+                })
+                .catch(() => {});
+        }
+
+        // 屏幕切流调度
+        function showScreen(screen) {
+            [screen1, screen2].forEach(s => s.classList.remove('active'));
+            requestAnimationFrame(() => {
+                screen.classList.add('active');
+            });
+        }
+
+        // 开启数据链路
+        function startStream() {
+            isPaused = false;
+            pauseBtn.innerText = "暂停画面";
+            loadingText.innerText = "正在建立图传连接...";
+            loadingText.style.display = 'block';
+            videoStream.style.display = 'none';
+
+            // 带上抗缓存时间戳，指向 /video_feed 规避 404
+            videoStream.src = STREAM_URL + "?t=" + Date.now();
+
+            let checkCount = 0;
+            checkInterval = setInterval(() => {
+                checkCount++;
+                if (videoStream.naturalWidth > 0) {
+                    clearInterval(checkInterval);
+                    loadingText.style.display = 'none';
+                    videoStream.style.display = 'block';
+                    addLogEntry('normal', '核心视频图传监视链路握手成功。');
+                } else if (checkCount > 50) {
+                    clearInterval(checkInterval);
+                    loadingText.innerText = "⚠️ 连接超时，请检查板子 Python 后端状态";
+                }
+            }, 100);
+
+            // 启动高速感知状态检测轮询（每 300ms 去找板子要一次有没有抓到人）
+            if (logPollInterval) clearInterval(logPollInterval);
+            logPollInterval = setInterval(pollDetectionFromBoard, 300);
+        }
+
+        function stopStream() {
+            videoStream.src = "";
+            if (checkInterval) clearInterval(checkInterval);
+            if (logPollInterval) clearInterval(logPollInterval);
+        }
+
+        // ===== 交互按钮事件 =====
+        startImageBtn.addEventListener('click', () => {
+            showScreen(screen2);
+            setTimeout(startStream, 100);
+        });
+
+        backBtn.addEventListener('click', () => {
+            stopStream();
+            showScreen(screen1);
+            addLogEntry('normal', '当前搜救任务已安全挂起并关闭链路。');
+        });
+
+        pauseBtn.addEventListener('click', () => {
+            if (isPaused) {
+                startStream();
+            } else {
+                isPaused = true;
+                pauseBtn.innerText = "恢复画面";
+                stopStream();
+                videoStream.style.display = 'none';
+                loadingText.innerText = "画面已暂停";
+                loadingText.style.display = 'block';
+                addLogEntry('normal', '图传接收器暂停。');
+            }
+        });
+    </script>
+</body>
+</html>
