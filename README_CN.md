@@ -45,34 +45,26 @@
 项目目录结构规范
 
 ```text
+## 📂 项目目录结构规范
+
+```text
 RDK-X5_Search_Rescue_System/
-├── .gitignore                          # Git 忽略配置（卡死临时缓存与大模型文件）
-├── LICENSE                             # MIT 开源许可证
-├── README.md                           # 英文主页说明书
-├── README_CN.md                        # 中文详细交付文档（当前文件）
-├── requirements.txt                    # 生产环境 Python 依赖清单
-│
-├── src/                                # 📂 源代码总目录
-│   ├── backend/                        # 📂 边缘计算后端服务
-│   │   └── main.py                     # RDK-X5 推理引擎、时空防抖网关与 Flask 路由
-│   │
-│   ├── frontend/                       # 📂 监控站前端大屏
-│   │   └── index.html                  # 科技感双栏 UI 搜救工作站控制大厅
-│   │
-│   └── mcu/                            # 📂 下位机核心动力与底层驱动
-│       ├── arduino_chassis_main/       # Arduino 主控底盘步态状态机控制
-│       │   └── Mech_hexapod.ino        
-│       └── arduino_low_level_drivers/  # Arduino 底层总线伺服、传感器与算法驱动
-│           ├── config.h
-│           ├── gait.cpp / gait.h       # 机器人多地形运动步态算法
-│           ├── servo_control.cpp       # 舵机/云台闭环控制
-│           └── thermal.cpp             # 红外热成像/环境传感器传感器解算
-│
-├── project_files/                      # 📂 芯片开发工程环境
-│   └── STM32F407VGT6---MOTOR.uvprojx   # STM32 MDK-ARM 核心电机驱动与云台控制工程
-│
-└── assets/                             # 📂 媒体资源仓
-    └── ui_screenshot.png               # 数字化工作站运行截图
+├── arduino_chassis_main/               # 📂 Arduino 主控底盘步态状态机控制
+│   └── Mech_hexapod.ino        
+├── arduino_low_level_drivers/          # 📂 Arduino 底层总线伺服、传感器与算法驱动
+│   ├── config.h
+│   ├── gait.cpp / gait.h               # 机器人多地形运动步态算法
+│   ├── servo_control.cpp               # 舵机/云台闭环控制
+│   └── thermal.cpp                     # 红外热成像/环境传感器传感器解算
+├── assets/                             # 📂 媒体资源仓（存放 README 架构图与运行截图）
+│   └── ui_screenshot.png               
+├── RDK.py                              # 📄 RDK-X5 边缘计算推理引擎、防抖网关与 Flask 路由
+├── ui.html                             # 📄 科技感双栏 UI 搜救工作站前端控制大厅
+├── STM32F407VGT6---MOTOR.uvprojx       # 📄 STM32 MDK-ARM 核心电机驱动与云台控制工程
+├── .gitignore                          # 📄 Git 忽略配置（卡死临时缓存与大模型文件）
+├── LICENSE                             # 📄 MIT 开源许可证
+├── README.md                           # 📄 英文主页说明书
+└── README_CN.md                        # 📄 中文详细交付文档（当前文件）
 
 核心技术亮点与算法机理
 1. BPU 硬件加速与异构模型推理后端运行于 RDK-X5 自带的 BPU（Brain Processing Unit）加速阵列上，加载经由量化编译的 detect1.bin 搜救检测模型。通过高吞吐的 hobot_dnn 库，避免了传统 CPU 推理的算力损耗，在 640x640 高清分辨率下实现低延时、低功耗的实时边缘检测。
