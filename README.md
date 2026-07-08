@@ -1,4 +1,4 @@
-🚀 [🌐 English](README.md) | [简体中文](README_CN.md)
+🚀 [🌐 English](README.md) | [简体中文](README_cn.md)
 
 # Intelligent Search & Rescue System for Earthquake Disaster Areas Based on RDK-X5 Edge Computing and Multi-Dimensional Vision Gimbal
 
