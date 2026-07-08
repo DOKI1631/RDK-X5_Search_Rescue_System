@@ -50,22 +50,29 @@
 
 ```text
 RDK-X5_Search_Rescue_System/
-├── arduino_chassis_main/               # 📂 Arduino 主控底盘步态状态机控制
+├── arduino_main/               # 📂 Arduino main chassis gait finite state machine control
 │   └── Mech_hexapod.ino        
-├── arduino_low_level_drivers/          # 📂 Arduino 底层总线伺服、传感器与算法驱动
+├── arduino_low_level_drivers/          # 📂 Arduino low-level bus servo, sensor, and algorithm drivers
 │   ├── config.h
-│   ├── gait.cpp / gait.h               # 机器人多地形运动步态算法
-│   ├── servo_control.cpp               # 舵机/云台闭环控制
-│   └── thermal.cpp                     # 红外热成像/环境传感器传感器解算
-├── assets/                             # 📂 媒体资源仓（存放 README 架构图与运行截图）
+│   ├── gait.cpp / gait.h               # Multi-terrain locomotion gait algorithms for the robot
+│   ├── servo_control.cpp               # Closed-loop servo & gimbal control
+│   └── thermal.cpp                     # Infrared thermal imaging & environmental sensor processing
+│   └── sensors.cpp / sensors.h
+│   └── leg_motion.cpp / leg_motion.h
+│   └── fight.cpp / fight.h
+│   └── dance.cpp / dance.h    
+├── assets/                             # 📂 Media assets directory (stores README architecture diagrams)
 │   └── ui_screenshot.png               
-├── RDK.py                              # 📄 RDK-X5 边缘计算推理引擎、防抖网关与 Flask 路由
-├── ui.html                             # 📄 科技感双栏 UI 搜救工作站前端控制大厅
-├── STM32F407VGT6---MOTOR.uvprojx       # 📄 STM32 MDK-ARM 核心电机驱动与云台控制工程
-├── .gitignore                          # 📄 Git 忽略配置（卡死临时缓存与大模型文件）
-├── LICENSE                             # 📄 MIT 开源许可证
-├── README.md                           # 📄 英文主页说明书
-└── README_CN.md                        # 📄 中文详细交付文档（当前文件）
+├── RDK X5                              # 📄 RDK-X5 edge computing inference engine, stabilization gateway, and Flask routes
+│   └── Detect.wav
+│   └── RDK.py
+│   └── detect1.bin
+├── ui.html                             # 📄 High-tech dual-column UI search & rescue workstation frontend control dashboard
+├── STM32F407VGT6---MOTOR.uvprojx       # 📄 STM32 MDK-ARM core motor driver & gimbal control project
+├── .gitignore                          # 📄 Git ignore configurations (filters temporary cache & large model files)
+├── LICENSE                             # 📄 MIT Open-Source License
+├── README.md                           # 📄 English documentation (this file)
+└── README_cn.md                        # 📄 Chinese detailed delivery documentation
 ```
 
 ---
