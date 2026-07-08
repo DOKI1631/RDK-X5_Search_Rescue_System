@@ -35,22 +35,29 @@ The system consists of three main components: the Edge Perception Brain, Lower-L
 
 ```text
 RDK-X5_Search_Rescue_System/
-├── arduino_chassis_main/               # 📂 Arduino main chassis gait finite state machine control
+├── arduino_main/               # 📂 Arduino main chassis gait finite state machine control
 │   └── Mech_hexapod.ino        
 ├── arduino_low_level_drivers/          # 📂 Arduino low-level bus servo, sensor, and algorithm drivers
 │   ├── config.h
 │   ├── gait.cpp / gait.h               # Multi-terrain locomotion gait algorithms for the robot
 │   ├── servo_control.cpp               # Closed-loop servo & gimbal control
 │   └── thermal.cpp                     # Infrared thermal imaging & environmental sensor processing
+│   └── sensors.cpp / sensors.h
+│   └── leg_motion.cpp / leg_motion.h
+│   └── fight.cpp / fight.h
+│   └── dance.cpp / dance.h    
 ├── assets/                             # 📂 Media assets directory (stores README architecture diagrams)
 │   └── ui_screenshot.png               
-├── RDK.py                              # 📄 RDK-X5 edge computing inference engine, stabilization gateway, and Flask routes
+├── RDK X5                              # 📄 RDK-X5 edge computing inference engine, stabilization gateway, and Flask routes
+│   └── Detect.wav
+│   └── RDK.py
+│   └── detect1.bin
 ├── ui.html                             # 📄 High-tech dual-column UI search & rescue workstation frontend control dashboard
 ├── STM32F407VGT6---MOTOR.uvprojx       # 📄 STM32 MDK-ARM core motor driver & gimbal control project
 ├── .gitignore                          # 📄 Git ignore configurations (filters temporary cache & large model files)
 ├── LICENSE                             # 📄 MIT Open-Source License
 ├── README.md                           # 📄 English documentation (this file)
-└── README_CN.md                        # 📄 Chinese detailed delivery documentation
+└── README_cn.md                        # 📄 Chinese detailed delivery documentation
 ```
 
 ---
