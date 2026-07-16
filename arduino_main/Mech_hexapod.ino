@@ -1,12 +1,3 @@
-////////////////////////////////////////////////////////////////////////////////
-//           Mech_Hexapod Control Program - Main Program (Fixed & Optimized)
-//
-// Copyright (C) 2025, 2026, 2027, 2028 Guang Dian Cong Lin Robotics, LLC.
-//
-// This is the main program file that integrates all modules and contains
-// the setup() and loop() functions.
-////////////////////////////////////////////////////////////////////////////////
-
 #include "config.h"
 #include "servo_control.h"
 #include "leg_motion.h"
