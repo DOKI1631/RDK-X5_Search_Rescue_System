@@ -51,8 +51,10 @@ extern const char *Version;
 #define ECHO_R A1
 
 // 避障安全阈值设定
-#define WARNING_DIST 25  // 警告距离：单侧轻微调整
-#define DANGER_DIST  15  // 极度危险距离：必须后退拉开距离
+#define WARNING_DIST 26  // 普通单侧避障阈值（原30cm）
+#define DANGER_DIST  20  // 紧急后退阈值（原25cm）
+#define OBSTACLE_CLEAR_DIST 33 // 恢复阈值（原38cm），仍比进入阈值高7cm形成滞回
+#define OBSTACLE_CONFIRM_FRAMES 2 // 连续 N 帧确认后才进入普通避障
 
 // ==========================================
 // 周期性探头扫描配置（消除正前方超声波盲区）
@@ -62,8 +64,8 @@ extern const char *Version;
 //       频率低（4秒一次），不会造成舵机电流冲击。
 //       注释掉 #define PERIODIC_SCAN 可关闭此行为。
 #define PERIODIC_SCAN              // 启用周期性探头扫描
-#define SCAN_CHECK_INTERVAL  4000  // 扫描间隔 (ms)，多久探头一次
-#define SCAN_SWEEP_DURATION   350  // 单次探头持续 (ms)，足以让超声波扫过中央
+#define SCAN_CHECK_INTERVAL  6000  // 扫描间隔 (ms)，降低无障碍时的无谓转向
+#define SCAN_SWEEP_DURATION   250  // 单次探头持续 (ms)，减小探头动作幅度
 
 // ==========================================
 // 直行速度与重心偏移补偿
@@ -73,9 +75,10 @@ extern const char *Version;
 //   正数 = 身体右倾，适合重心偏左的机器人
 //   负数 = 身体左倾，适合重心偏右的机器人
 //   0 = 不补偿
-#define FORWARD_PERIOD      700   // 直行步态周期 (ms)
-#define DRIFT_COMPENSATION  -30   // 重心偏移补偿（左偏→负值左倾，实测-12）
-#define PITCH_COMPENSATION  12    // 俯仰补偿：正值=前腿伸直/后腿下蹲→身体后仰（防磕头），前重后轻加大
+#define FORWARD_PERIOD      560   // 比600快约7%；再低会压缩MG90S落腿时间
+#define DRIFT_COMPENSATION    1   // 更换故障舵机后+2轻微右偏，回调到+1作为机械修复后的直行基准
+#define PITCH_COMPENSATION    0   // 六腿使用同一基础高度；实机证明+8会使前腿角度过高、前端反而偏低且更易发热
+#define FRONT_KNEE_COMPENSATION  5 // 已按腿部标注确认：前腿LEG2/LEG3站立160→165，抬腿65→70
 
 // ==========================================
 // AMG8833 热成像传感器配置
@@ -84,13 +87,26 @@ extern const char *Version;
 #define THERMAL_SDA_PIN       5       // 热成像软件I2C数据线（PD5，复用空闲超声波口）
 #define THERMAL_SCL_PIN       6       // 热成像软件I2C时钟线（PD6，复用空闲超声波口）
 #define HUMAN_TEMP_MIN        28.0f   // 人体热源最低温度阈值 (°C)
-#define HUMAN_TEMP_MAX        40.0f   // 人体热源最高温度阈值 (°C)
-#define THERMAL_STOP_COLS     6       // 热源占据 ≥6 列 → 到达目标，停止
-#define THERMAL_CLOSE_COLS    4       // 热源占据 ≥4 列 → 接近目标，可减速
-#define THERMAL_CLOSE_PIXELS  12      // 热源像素 ≥12 个 → 热源较近
-#define THERMAL_GESTURE_MS    2000    // 双手遮挡超声波 2 秒切换热成像模式
-#define THERMAL_SCAN_SPEED    1000    // 热源扫描旋转速度（ms 周期，越大越慢）
-#define THERMAL_APPROACH_SPEED 800   // 热源接近前进速度（ms 周期）
+#define HUMAN_TEMP_MAX        42.0f   // 人体热源最高温度阈值 (°C)（提高至42°C避免传感器自热误触发）
+#define THERMAL_STOP_COLS     6       // 热源覆盖 ≥6 列时，检测器标记为很近
+#define THERMAL_CLOSE_COLS    4       // 热源覆盖 ≥4 列时，检测器标记为较近
+#define THERMAL_CLOSE_PIXELS  12      // 热源像素 ≥12 个时，检测器标记为较近
+
+// ★ 热成像传感器防误触发保护
+#define THERMAL_WARMUP_MS      5000   // AMG8833 上电后的稳定等待时间 (ms)
+#define THERMAL_BACKGROUND_DELTA 3.0f // 热点至少高于稳健背景温度 3°C
+#define THERMAL_MIN_PEAK_DELTA 3.5f   // 主热斑峰值与背景的最小温差
+#define THERMAL_MIN_BLOB_PIXELS 4     // 至少 4 个相邻热点，拒绝孤立坏点/反光噪声
+#define THERMAL_MAX_HOT_RATIO  0.40f  // 主热斑超过画面 40% 时视为大面积热背景
+#define THERMAL_CONSECUTIVE_DETECT 5  // 独立热成像连续识别 5 帧有效热斑后蜂鸣一次
+#define THERMAL_REARM_CLEAR_FRAMES 3  // 热源连续消失 3 帧后重新布防，允许下一个热源再次蜂鸣
+
+// 步态切换先让六腿落地一个短暂窗口，避免不同周期相位跳变导致两组三脚架同时抬起
+#define GAIT_TRANSITION_SETTLE_MS 90
+
+// 超声波偶发无回波时先保留最近有效距离，避免单帧超时被当成“突然清空”。
+// 连续超时后仍按远距离处理（开放空间本身也会没有回波）。
+#define ULTRASONIC_TIMEOUT_HOLD_FRAMES 2
 
 // Battery Voltage Detection
 #define BATTERY_PIN A7             // ADC pin for battery voltage reading
@@ -116,7 +132,7 @@ extern byte FreqMult;             // PWM frequency multiplier, use 1 for analog 
 #define HEXSIZE 0                  // set this to 0 for hexapod, 1 for megapod and 2 for gigapod
 
 #if HEXSIZE == 0
-#define TIMEFACTOR 10L
+#define TIMEFACTOR 8L
 #define HEXAPOD
 #endif
 
@@ -144,9 +160,9 @@ extern byte FreqMult;             // PWM frequency multiplier, use 1 for analog 
 #define TRIPOD2_LEGS  0b101010
 #define QUAD1_LEGS    0b001001
 #define QUAD2_LEGS    0b100100
-#define FRONT_LEGS    0b100001
+#define FRONT_LEGS    0b001100   // 实机传感器/重载端：LEG2 + LEG3
 #define MIDDLE_LEGS   0b010010
-#define BACK_LEGS     0b001100
+#define BACK_LEGS     0b100001   // 实机后端：LEG0 + LEG5
 #define NO_LEGS       0b0
 
 // Individual Leg Bitmasks
@@ -165,21 +181,24 @@ extern byte FreqMult;             // PWM frequency multiplier, use 1 for analog 
 #define LEG5BIT  0b100000
 
 // Leg Position Definitions
-#define ISFRONTLEG(LEG) (LEG==0||LEG==5)
+#define ISFRONTLEG(LEG) (LEG==2||LEG==3)  // 实机安装方向与原模板相差180°
 #define ISMIDLEG(LEG)   (LEG==1||LEG==4)
-#define ISBACKLEG(LEG)  (LEG==2||LEG==3)
+#define ISBACKLEG(LEG)  (LEG==0||LEG==5)
+#define ISFRONTKNEESERVO(LEG) (LEG==2||LEG==3) // 按实机标注确认的前腿；对应竖直舵机通道8/9
 #define ISLEFTLEG(LEG)  (LEG==3||LEG==4||LEG==5)  // 与 LEFT_START=3 一致
 #define ISRIGHTLEG(LEG) (LEG==0||LEG==1||LEG==2)
 
 // Knee Angle Definitions (in degrees)
+// 0°=完全折叠, 180°=完全伸直
+// 越野配置：站姿更高 + 抬腿折叠更多 = 离地间隙大
 #define KNEE_UP_MAX 0
 #define KNEE_UP    30
 #define KNEE_RELAX  60
-#define KNEE_NEUTRAL 90
+#define KNEE_NEUTRAL 65          // 比原75°多抬10°；继续减小会显著增加负载和落腿时间
 #define KNEE_CROUCH 70
 #define KNEE_HALF_CROUCH 100
-#define KNEE_STAND 150
-#define KNEE_DOWN  150
+#define KNEE_STAND 160           // 站立时膝盖更直 → 身体更高
+#define KNEE_DOWN  160           // 行走支撑腿高度同步
 #define KNEE_TIPTOES 175
 #define KNEE_FOLD 10
 
@@ -191,7 +210,7 @@ extern byte FreqMult;             // PWM frequency multiplier, use 1 for analog 
 #define TWITCH_ADJ 60
 
 // Hip Angle Definitions (in degrees)
-#define HIPSWING 25               // how far to swing hips on gaits like tripod or quadruped
+#define HIPSWING 35               // how far to swing hips on gaits like tripod or quadruped（越野加大步幅）
 #define HIPSMALLSWING 10          // when in fine adjust mode how far to move hips
 #define HIPSWING_RIPPLE 25
 #define HIP_FORWARD_MAX 175
@@ -226,7 +245,7 @@ extern byte FreqMult;             // PWM frequency multiplier, use 1 for analog 
 #define NOMOVE (-1)               // fake value meaning this aspect of the leg (knee or hip) shouldn't move
 
 // Gait Timing Configuration
-#define TRIPOD_CYCLE_TIME 750
+#define TRIPOD_CYCLE_TIME 600
 #define RIPPLE_CYCLE_TIME 1000
 #define FIGHT_CYCLE_TIME 660
 
