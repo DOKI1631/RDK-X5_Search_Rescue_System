@@ -36,7 +36,7 @@ unsigned int readDistance(int trigPin, int echoPin) {
   // 8000us 超时 ≈ 1.36m 探测范围，宁可读不到也不长时间阻塞舵机
   unsigned long duration = pulseIn(echoPin, HIGH, 8000);
 
-  if (duration == 0) return 1000; // 超时 → 前方空旷
+  if (duration == 0) return 0;    // 0 交给滤波层区分偶发丢回波与持续无回波
   return duration / 58;           // 声速公式转换为厘米
 }
 
