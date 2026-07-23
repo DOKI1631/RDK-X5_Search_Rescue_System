@@ -26,8 +26,9 @@ void resetServoDriver() {
   servoDriver.setPWMFreq(PWMFREQUENCY);  // Analog servos run at ~60 Hz updates
 }
 
-void setServo(int servonum, unsigned int position) {
-  servonum = constrain(servonum,0,15);
+void setServo(int servonum, int position) {
+  // ServoPos/ServoTime/ServoTrim 只有 12 项；禁止附件通道或负索引越界。
+  if (servonum < 0 || servonum >= 2 * NUM_LEGS) return;
   position = constrain(position,0,180);
 
   if (servonum < 12 && servoOffset != 0) {  // we don't want this to effect accessory servos like the grip arm
@@ -158,12 +159,20 @@ void checkForServoSleep() {
     // See if the servo driver module went to sleep, probably due to a short power dip
     Wire.beginTransmission(SERVO_IIC_ADDR);
     Wire.write(0);  // address 0 is the MODE1 location of the servo driver, see documentation on the PCA9685 chip for more info
-    Wire.endTransmission();
-    Wire.requestFrom((uint8_t)SERVO_IIC_ADDR, (uint8_t)1);
-    int mode1 = Wire.read();
-    if (mode1 & 16) { // the fifth bit up from the bottom is 1 if controller was asleep
+    byte txStatus = Wire.endTransmission();
+    byte received = 0;
+    int mode1 = -1;
+    if (txStatus == 0) {
+      received = Wire.requestFrom((uint8_t)SERVO_IIC_ADDR, (uint8_t)1);
+      if (received == 1 && Wire.available()) mode1 = Wire.read();
+    }
+
+    // 只有成功读到 MODE1 才判断休眠。旧代码在 I2C 短暂失败时 Wire.read()=-1，
+    // -1 的休眠位恒为 1，会反复误复位 PCA9685 并让全部舵机瞬间失去脉冲。
+    if (mode1 >= 0 && (mode1 & 16)) {
       // wake it up!
       resetServoDriver();
+      attach_all_servos();  // begin() 会清空输出，必须立即重发当前 12 路位置
       beep(1200,50);  // chirp to warn user of brown out on servo controller
       beep(800,50);
       SuppressScamperUntil = millis() + 10000;  // no scamper for you! (for 10 seconds)
@@ -175,7 +184,7 @@ void checkForServoSleep() {
 void GeneralCheckSmoothMoves() {
   static long lastSmoothTime = 0;
 
-#define SMOOTHTIME 20 // milliseconds resolution
+#define SMOOTHTIME 30 // milliseconds resolution
 
   long now = millis();
   if (now >= lastSmoothTime + SMOOTHTIME) {
@@ -189,7 +198,7 @@ void GeneralCheckSmoothMoves() {
 }
 
 void SmoothMove(int servo) {
-#define SMOOTHINC  3  // degrees per resolution time
+#define SMOOTHINC  2  // degrees per resolution time
   int tmp = deferServoSet;
 
   if (abs(ServoPos[servo] - ServoTarget[servo]) <= SMOOTHINC) {
