@@ -90,29 +90,26 @@ void setLeg(int legmask, int hip_pos, int knee_pos, int adj, int raw, int leanan
       if (knee_pos != NOMOVE) {
         int pos = knee_pos;
 
-        // 俯仰补偿：前腿角度↓=身体抬升、后腿角度↑=身体下蹲 → 后仰防磕头
-        // 注意：膝盖角度与身体高度成反比（角度大→腿折叠→身体低）
+        // 俯仰补偿：本项目定义 0°=折叠、180°=伸直。
+        // 正补偿应让前腿更直、后腿略收，形成后仰并降低避障时磕头概率。
         if (PITCH_COMPENSATION != 0) {
           if (ISFRONTLEG(i)) {
-            pos -= PITCH_COMPENSATION;  // 角度减小 → 腿更直 → 前身抬升
+            pos += PITCH_COMPENSATION;
           } else if (ISBACKLEG(i)) {
-            pos += PITCH_COMPENSATION;  // 角度增大 → 腿更蹲 → 后身降低
+            pos -= PITCH_COMPENSATION;
           }
         }
 
-        // 左右重心偏移补偿（leanangle）
+        // 使用实机腿部标注确认的前腿映射：LEG2/LEG3（膝舵机通道 8/9）。
+        if (ISFRONTKNEESERVO(i)) {
+          pos += FRONT_KNEE_COMPENSATION;
+        }
+
+        // 左右重心偏移补偿（leanangle）。正值让左腿伸长、右腿收短，
+        // 身体向右倾；负值反之。旧实现误按前/中/后腿分组，会造成俯仰畸变。
         if (leanangle != 0) {
-          switch (i) {
-            case 0: case 5:
-              if (leanangle < 0) pos -= leanangle;
-              break;
-            case 1: case 4:
-              pos += abs(leanangle/2);
-              break;
-            case 2: case 3:
-              if (leanangle > 0) pos += leanangle;
-              break;
-          }
+          if (ISLEFTLEG(i)) pos += leanangle;
+          else if (ISRIGHTLEG(i)) pos -= leanangle;
         }
 
         setKnee(i, pos);
@@ -137,14 +134,36 @@ void turn(int ccw, int hipforward, int hipbackward, int kneeup, int kneedown, lo
 #define NUM_TURN_PHASES 6
 #define FBSHIFT_TURN    40   // shift front legs back, back legs forward, this much
 
-  long t = hexmillis()%timeperiod;
-  long phase = (NUM_TURN_PHASES*t)/timeperiod;
+  // 与直行三脚架相同：阻塞后只推进一相，避免漏掉落腿相位。
+  static int phase = 0;
+  static unsigned long nextPhaseTime = 0;
+  static unsigned long lastCallTime = 0;
+  static long scheduledPeriod = 0;
+  static int scheduledCcw = -1;
+  unsigned long now = hexmillis();
+  unsigned long phaseDuration = (unsigned long)(timeperiod / NUM_TURN_PHASES);
+  if (phaseDuration < 1) phaseDuration = 1;
+
+  bool restartSequence = (nextPhaseTime == 0 || scheduledPeriod != timeperiod ||
+                          scheduledCcw != ccw ||
+                          now - lastCallTime > (unsigned long)timeperiod);
+  if (restartSequence) {
+    phase = 0;
+    nextPhaseTime = now + phaseDuration;
+    scheduledPeriod = timeperiod;
+    scheduledCcw = ccw;
+  } else if ((long)(now - nextPhaseTime) >= 0) {
+    phase = (phase + 1) % NUM_TURN_PHASES;
+    nextPhaseTime = now + phaseDuration;
+  }
+  lastCallTime = now;
 
   transactServos();  // 批量处理所有舵机指令，确保转弯平滑
 
   switch (phase) {
     case 0:
       // in this phase, center-left and noncenter-right legs raise up at the knee
+      setLeg(TRIPOD2_LEGS, NOMOVE, kneedown, 0);
       setLeg(TRIPOD1_LEGS, NOMOVE, kneeup, 0);
       break;
 
@@ -162,6 +181,7 @@ void turn(int ccw, int hipforward, int hipbackward, int kneeup, int kneedown, lo
 
     case 3:
       // lift up the other set of legs at the knee
+      setLeg(TRIPOD1_LEGS, NOMOVE, kneedown, 0);
       setLeg(TRIPOD2_LEGS, NOMOVE, kneeup, 0);
       break;
 
@@ -183,36 +203,33 @@ void turn(int ccw, int hipforward, int hipbackward, int kneeup, int kneedown, lo
 
 void stand() {
   transactServos();
-  setLeg(ALL_LEGS, HIP_NEUTRAL, KNEE_STAND, 0);
+  setLeg(ALL_LEGS, HIP_NEUTRAL, KNEE_STAND, 0, 0, DRIFT_COMPENSATION);
   commitServos();
 }
 
-// Gradual stand-up: moves legs in 3 diagonal-pair groups with delays
-// to avoid the massive current spike of all 12 servos starting at once.
-// This prevents brown-out reset on battery-powered setups.
+// Gradual stand-up: front-heavy chassis must establish both front supports first.
+// Each pair moves through half-crouch before full stand to reduce startup torque.
 void standGradual() {
-  // Group 1: Leg 0 (front-right) + Leg 3 (back-left)
-  Serial.println(F("SG1"));
+  // Front pair first: lifting it last makes the loaded nose hard to raise.
+  Serial.println(F("STAND FRONT 1/2"));
   Serial.flush();
-  transactServos();
-  setLeg(LEG0 | LEG3, HIP_NEUTRAL, KNEE_STAND, 0);
-  commitServos();
+  setLeg(FRONT_LEGS, HIP_NEUTRAL, KNEE_HALF_CROUCH, 0, 0, DRIFT_COMPENSATION);
+  delay(250);
+  setLeg(FRONT_LEGS, NOMOVE, KNEE_STAND, 0, 0, DRIFT_COMPENSATION);
+  delay(350);
+
+  Serial.println(F("STAND MIDDLE 2/3"));
+  Serial.flush();
+  setLeg(MIDDLE_LEGS, HIP_NEUTRAL, KNEE_HALF_CROUCH, 0, 0, DRIFT_COMPENSATION);
+  delay(200);
+  setLeg(MIDDLE_LEGS, NOMOVE, KNEE_STAND, 0, 0, DRIFT_COMPENSATION);
   delay(300);
 
-  // Group 2: Leg 1 (mid-right) + Leg 4 (mid-left)
-  Serial.println(F("SG2"));
+  Serial.println(F("STAND BACK 3/3"));
   Serial.flush();
-  transactServos();
-  setLeg(LEG1 | LEG4, HIP_NEUTRAL, KNEE_STAND, 0);
-  commitServos();
-  delay(300);
-
-  // Group 3: Leg 2 (back-right) + Leg 5 (front-left)
-  Serial.println(F("SG3"));
-  Serial.flush();
-  transactServos();
-  setLeg(LEG2 | LEG5, HIP_NEUTRAL, KNEE_STAND, 0);
-  commitServos();
+  setLeg(BACK_LEGS, HIP_NEUTRAL, KNEE_HALF_CROUCH, 0, 0, DRIFT_COMPENSATION);
+  delay(200);
+  setLeg(BACK_LEGS, NOMOVE, KNEE_STAND, 0, 0, DRIFT_COMPENSATION);
   delay(300);
 }
 
