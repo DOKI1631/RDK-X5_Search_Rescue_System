@@ -50,13 +50,37 @@ void gait_tripod(int reverse, int hipforward, int hipbackward,
 #define NUM_TRIPOD_PHASES 6
 #define FBSHIFT    12   // shift front legs back, back legs forward (降低防磕头：前腿少往前伸)
 
-  long t = hexmillis()%timeperiod;
-  long phase = (NUM_TRIPOD_PHASES*t)/timeperiod;
+  // 安全相位调度：每次最多推进一相，绝不因传感器/I2C/串口阻塞而跳相。
+  // 旧的 millis()%period 算法可能从“第一组抬起”直接跳到“第二组抬起”，
+  // 漏掉中间落腿相位，造成六腿同时折叠、周期性趴下。
+  static int phase = 0;
+  static unsigned long nextPhaseTime = 0;
+  static unsigned long lastCallTime = 0;
+  static long scheduledPeriod = 0;
+  static int scheduledReverse = -1;
+  unsigned long now = hexmillis();
+  unsigned long phaseDuration = (unsigned long)(timeperiod / NUM_TRIPOD_PHASES);
+  if (phaseDuration < 1) phaseDuration = 1;
+
+  bool restartSequence = (nextPhaseTime == 0 || scheduledPeriod != timeperiod ||
+                          scheduledReverse != reverse ||
+                          now - lastCallTime > (unsigned long)timeperiod);
+  if (restartSequence) {
+    phase = 0;
+    nextPhaseTime = now + phaseDuration;
+    scheduledPeriod = timeperiod;
+    scheduledReverse = reverse;
+  } else if ((long)(now - nextPhaseTime) >= 0) {
+    phase = (phase + 1) % NUM_TRIPOD_PHASES;
+    nextPhaseTime = now + phaseDuration; // 从当前时刻计时，不追赶、不跳过缺失相位
+  }
+  lastCallTime = now;
 
   transactServos(); // defer leg motions until after checking for crashes
   switch (phase) {
     case 0:
       // in this phase, center-left and noncenter-right legs raise up at the knee
+      setLeg(TRIPOD2_LEGS, NOMOVE, kneedown, 0, 0, leanangle);
       setLeg(TRIPOD1_LEGS, NOMOVE, kneeup, 0, 0, leanangle);
       break;
 
@@ -74,6 +98,7 @@ void gait_tripod(int reverse, int hipforward, int hipbackward,
 
     case 3:
       // lift up the other set of legs at the knee
+      setLeg(TRIPOD1_LEGS, NOMOVE, kneedown, 0, 0, leanangle);
       setLeg(TRIPOD2_LEGS, NOMOVE, kneeup, 0, 0, leanangle);
       break;
 
