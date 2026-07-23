@@ -41,6 +41,8 @@ struct HeatSourceResult {
   bool detected;            // True if a valid heat source is found
   float maxTemp;            // Highest temperature in the grid (°C)
   float avgTemp;            // Average temperature of the hot region (°C)
+  float backgroundTemp;     // Robust background estimate (°C)
+  float peakDelta;          // Dominant blob peak minus background (°C)
   int centerX;              // Weighted center X position of hot pixels (0~7)
   int centerY;              // Weighted center Y position of hot pixels (0~7)
   int hotPixelCount;        // Number of pixels above human temp threshold
@@ -80,5 +82,9 @@ int getHeatDistance(int hotColumns, int hotPixelCount);
 
 // Check if the sensor is responding on the I2C bus
 bool isThermalConnected();
+
+// Check if the sensor has completed its warm-up stabilization period
+// Returns false during warmup — thermal readings should be ignored
+bool isThermalWarmedUp();
 
 #endif // THERMAL_H
