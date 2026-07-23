@@ -1,3 +1,12 @@
+////////////////////////////////////////////////////////////////////////////////
+//           Mech_Hexapod Control Program - Main Program (Fixed & Optimized)
+//
+// Copyright (C) 2025, 2026, 2027, 2028 Guang Dian Cong Lin Robotics, LLC.
+//
+// This is the main program file that integrates all modules and contains
+// the setup() and loop() functions.
+////////////////////////////////////////////////////////////////////////////////
+
 #include "config.h"
 #include "servo_control.h"
 #include "leg_motion.h"
@@ -17,7 +26,7 @@
 void executeAction(int type, unsigned long duration, int dir);
 
 // Version String
-const char *Version = "#RV3r1a";
+const char *Version = "#RV3r14l-independent-thermal";
 
 // Global Variables defined in config.h
 byte FreqMult = 1;   // PWM frequency multiplier
@@ -32,47 +41,68 @@ unsigned long LastValidReceiveTime = 0;
 int Dialmode;
 
 // ==================== 热成像模式全局变量 ====================
-bool thermalMode = true;                // 热成像搜索模式开关（默认开启）
+bool thermalMode = false;               // 传感器初始化成功后自动开启，与 RDK-X5 独立
 bool servosAvailable = false;           // PCA9685 在线标志
-unsigned long thermalGestureStart = 0;  // 双手遮挡开始时间（用于手势检测）
-bool thermalGestureArmed = false;       // 手势计时是否已开始
-bool thermalStopLocked = false;         // ★ 热成像锁定：一旦找到目标，锁定舵机禁止任何运动，仅手势可解
 bool cameraStopLocked = false;          // ★ 摄像头锁定：RDK-X5识别到人后永久停车，最高优先级
+bool thermalAlarmLatched = false;       // 同一热源只蜂鸣一次，热源连续消失后重新布防
 float thermalPixels[THERMAL_PIXELS];    // 64 像素温度网格
 HeatSourceResult thermalResult;         // 热源检测结果
 unsigned long lastThermalReadTime = 0;  // 上次读取热成像的时间
 bool thermalSensorOK = false;           // 热成像传感器是否正常
+byte thermalConsecutiveDetect = 0;      // ★ 连续检测到热源的次数（防瞬时噪声）
+byte thermalClearConsecutive = 0;       // 热源连续消失帧数，达到门限后允许下一次蜂鸣
 
-// ==================== 左右超声波滑动平均滤波重构 ====================
-#define DIST_WINDOW_SIZE 5
-unsigned int distBufferL[DIST_WINDOW_SIZE] = {1000, 1000, 1000, 1000, 1000};
-unsigned int distBufferR[DIST_WINDOW_SIZE] = {1000, 1000, 1000, 1000, 1000};
-int distIndexL = 0;
-int distIndexR = 0;
+// ==================== 左右超声波三点中值滤波 ====================
+// 旧的 5 帧均值窗口初始填入 1000cm，真实障碍出现后要约 0.5 秒才降到阈值；
+// 中值滤波能拒绝单次毛刺，同时在连续两帧遇障后立即响应。
+#define DIST_WINDOW_SIZE 3
+unsigned int distBufferL[DIST_WINDOW_SIZE] = {1000, 1000, 1000};
+unsigned int distBufferR[DIST_WINDOW_SIZE] = {1000, 1000, 1000};
+byte distIndexL = 0;
+byte distIndexR = 0;
+bool distInitializedL = false;
+bool distInitializedR = false;
+byte distTimeoutL = 0;
+byte distTimeoutR = 0;
+byte obstacleConfirmL = 0;
+byte obstacleConfirmR = 0;
+
+unsigned int median3(unsigned int a, unsigned int b, unsigned int c) {
+  if (a > b) { unsigned int t = a; a = b; b = t; }
+  if (b > c) { unsigned int t = b; b = c; c = t; }
+  if (a > b) { unsigned int t = a; a = b; b = t; }
+  return b;
+}
+
+unsigned int filterDistance(unsigned int raw, unsigned int buffer[DIST_WINDOW_SIZE],
+                            byte &index, bool &initialized, byte &timeoutCount) {
+  if (raw == 0) {
+    if (initialized && timeoutCount < ULTRASONIC_TIMEOUT_HOLD_FRAMES) {
+      timeoutCount++;
+      return median3(buffer[0], buffer[1], buffer[2]);
+    }
+    raw = 1000;
+  } else {
+    timeoutCount = 0;
+  }
+  if (!initialized) {
+    for (int i = 0; i < DIST_WINDOW_SIZE; i++) buffer[i] = raw;
+    initialized = true;
+  } else {
+    buffer[index] = raw;
+    index = (index + 1) % DIST_WINDOW_SIZE;
+  }
+  return median3(buffer[0], buffer[1], buffer[2]);
+}
 
 // 左侧超声波滤波刷新
 unsigned int filterDistanceL(unsigned int raw) {
-  // 如果读取到0，通常是超时或错误造成的跳变噪声，转换为远距离空旷值防误触
-  if (raw == 0) raw = 1000; 
-  distBufferL[distIndexL] = raw;
-  distIndexL = (distIndexL + 1) % DIST_WINDOW_SIZE;
-  unsigned long sum = 0;
-  for (int i = 0; i < DIST_WINDOW_SIZE; i++) {
-    sum += distBufferL[i];
-  }
-  return (unsigned int)(sum / DIST_WINDOW_SIZE);
+  return filterDistance(raw, distBufferL, distIndexL, distInitializedL, distTimeoutL);
 }
 
 // 右侧超声波滤波刷新
 unsigned int filterDistanceR(unsigned int raw) {
-  if (raw == 0) raw = 1000; 
-  distBufferR[distIndexR] = raw;
-  distIndexR = (distIndexR + 1) % DIST_WINDOW_SIZE;
-  unsigned long sum = 0;
-  for (int i = 0; i < DIST_WINDOW_SIZE; i++) {
-    sum += distBufferR[i];
-  }
-  return (unsigned int)(sum / DIST_WINDOW_SIZE);
+  return filterDistance(raw, distBufferR, distIndexR, distInitializedR, distTimeoutR);
 }
 
 // Trim State Variables
@@ -177,7 +207,8 @@ void checkBatteryStatus() {
       lowBatteryAlarmActive = true;
       if (currentTime - lastBatteryAlarmTime >= 5000) {
         lastBatteryAlarmTime = currentTime;
-        loudAlert(2);  // 低电量扫频警报
+        // tone() 自身非阻塞；不要在三脚架抬腿相位里执行多段 delay() 扫频。
+        beep(1200, 200);
       }
     } else {
       lowBatteryAlarmActive = false;
@@ -202,7 +233,8 @@ unsigned long SuppressModesUntil = 0;
 short priorDialMode = -1;
 
 void setup() {
-  Serial.begin(9600);
+  // 高速串口避免状态输出挤占 100ms 感知/步态刷新窗口。
+  Serial.begin(115200);
   Serial.println();
   Serial.println(Version);
 
@@ -259,13 +291,26 @@ void setup() {
   }
 
   resetServoDriver();
-  servosAvailable = true;  // PCA9685 初始化成功
+  Wire.beginTransmission(SERVO_IIC_ADDR);
+  byte pcaStatus = Wire.endTransmission();
+  servosAvailable = (pcaStatus == 0);
+  if (servosAvailable) {
+    Serial.println(F("PCA9685: OK at 0x40"));
+  } else {
+    Serial.print(F("ERROR: PCA9685 not responding, I2C status="));
+    Serial.println(pcaStatus);
+    beep(150, 500); // 只报一次，不在loop中连续鸣叫
+  }
   delay(250);
 
   // 初始化 AMG8833 热成像传感器（与舵机驱动共用 I2C 总线）
   thermalSensorOK = initThermal();
   if (!thermalSensorOK) {
+    thermalMode = false;
     Serial.println(F("WARN: Thermal sensor not found. Thermal mode disabled."));
+  } else {
+    thermalMode = true;
+    Serial.println(F("THERMAL MODE: AUTO ON (independent from RDK)"));
   }
 
   // 安全初始化：ServoPos 预填站立角度，防止任何函数 commitServos 时把未设置的舵机命令到 0°
@@ -274,9 +319,11 @@ void setup() {
     ServoPos[i + KNEE_OFFSET] = KNEE_STAND;
   }
 
-  standGradual();  // 渐进站立，分 3 组避免 12 舵机同时启动的电流尖峰 → 欠压复位
-  delay(300);
-  beep(400);
+  if (servosAvailable) {
+    standGradual();  // 渐进站立，分 3 组避免 12 舵机同时启动的电流尖峰 → 欠压复位
+    delay(300);
+    beep(400);
+  }
   yield();
 }
 
@@ -288,10 +335,9 @@ enum RobotState {
   STATE_BACKWARD,       // 直退
   STATE_TURN_LEFT,      // 左转（避障）
   STATE_TURN_RIGHT,     // 右转（避障）
-  STATE_RETREAT_LEFT,   // 向左后方撤退（带方向感知）
-  STATE_RETREAT_RIGHT,  // 向右后方撤退（带方向感知）
+  STATE_RETREAT_LEFT,   // 紧急第一阶段：直退，结束后左转
+  STATE_RETREAT_RIGHT,  // 紧急第一阶段：直退，结束后右转
   STATE_ESCAPE,         // 卡死后大角度逃脱
-  STATE_THERMAL_STOP,   // 热成像模式：已到达热源，停止
   STATE_STOP            // RDK-X5 UART 强制停车
 };
 
@@ -314,10 +360,11 @@ static unsigned long lastScanCheck = 0;
 //   没有罗盘也能"知道方向"——记住自己走过的安全路径。
 //   前进时记录传感器读数，撤退时向记忆中最空旷的方向退。
 
-#define DIR_MEM_SIZE 16               // 方向记忆容量
-#define SAFE_CORRIDOR_DIST 50         // 超过此距离视为"安全走廊"
+#define DIR_MEM_SIZE 8                // ATmega328P SRAM有限；8条×750ms仍覆盖约6秒
+#define SAFE_CORRIDOR_DIST 45         // 超过此距离视为"安全走廊"（原50cm）
 #define OBSTACLE_STREAK_MAX 4         // 连续遇障 N 次触发逃脱模式
 #define RETREAT_DURATION 800          // 撤退持续时间 (ms)
+#define EMERGENCY_TURN_DURATION 900   // 完整直退后，向安全侧转弯的时间
 #define TURN_DURATION 1200            // 转弯最大持续时间 (ms)
 #define ESCAPE_DURATION 2500          // 逃脱模式持续时间 (ms)
 
@@ -336,12 +383,13 @@ byte pathHistCount = 0;
 // 方向追踪
 unsigned long lastClearForwardTime = 0;  // 最后一次"前方完全畅通"的时间
 unsigned long totalClearForwardMs = 0;   // 最近连续畅通前进的累计时间
+unsigned long lastMemoryRecordTime = 0;  // 750ms 采样一次，8条约覆盖6秒
 byte obstacleStreak = 0;                 // 连续遇障次数
 int retreatBias = 0;                     // 当前撤退偏向 (-1=偏左, 0=直退, 1=偏右)
 unsigned long streakResetTime = 0;       // 卡死计数重置时间
 
 // ---- 自动漂移补偿 ----
-int autoDriftCompensation = 0;           // 运行时自动漂移补偿 (-25..+25)
+int autoDriftCompensation = 0;           // 运行时自动漂移补偿，保守限制为 -1..+1
 unsigned int driftLeftCount = 0;         // 左侧遇障计数
 unsigned int driftRightCount = 0;        // 右侧遇障计数
 unsigned long lastDriftAdjustTime = 0;   // 上次漂移调整时间
@@ -363,27 +411,25 @@ void recordToMemory(unsigned int dL, unsigned int dR, byte moveType) {
 // 返回: -1 = 左后方更安全, 0 = 正后方安全(直退), 1 = 右后方更安全
 int computeRetreatBias() {
   unsigned long now = millis();
-  unsigned int bestLeft = 0;
-  unsigned int bestRight = 0;
+  unsigned long sumLeft = 0;
+  unsigned long sumRight = 0;
+  byte sampleCount = 0;
 
-  // 扫描最近 6 秒内的记忆，找传感器读数最大的时刻（最空旷）
+  // 只统计最近前进轨迹的平均读数。最大值很容易被单次超声波无回波污染。
   for (int i = 0; i < pathHistCount; i++) {
     if (now - pathHistory[i].timestamp > 6000) continue; // 超过 6 秒的记忆过期
-
-    if (pathHistory[i].distL > bestLeft) {
-      bestLeft = pathHistory[i].distL;
-    }
-    if (pathHistory[i].distR > bestRight) {
-      bestRight = pathHistory[i].distR;
-    }
+    if (pathHistory[i].moveType != 0) continue;
+    sumLeft += (pathHistory[i].distL > 200U) ? 200U : pathHistory[i].distL;
+    sumRight += (pathHistory[i].distR > 200U) ? 200U : pathHistory[i].distR;
+    sampleCount++;
   }
 
-  // 比较两侧的历史最佳读数
-  int diff = (int)bestLeft - (int)bestRight;
+  if (sampleCount < 2) return 0;
+  int diff = (int)(sumLeft / sampleCount) - (int)(sumRight / sampleCount);
 
-  if (diff > 30) {
+  if (diff > 15) {
     return -1; // 左边历史上更空旷 → 向左后方退
-  } else if (diff < -30) {
+  } else if (diff < -15) {
     return 1;  // 右边历史上更空旷 → 向右后方退
   } else {
     return 0;  // 两边差不多 → 直退（原路返回）
@@ -393,18 +439,19 @@ int computeRetreatBias() {
 // 检查路径记忆中正后方是否安全（最近前进时读数是否空旷）
 bool isRearPathSafe() {
   unsigned long now = millis();
+  byte safeSamples = 0;
   for (int i = 0; i < pathHistCount; i++) {
     // 找最近 4 秒内的前进记录
     if (now - pathHistory[i].timestamp > 4000) continue;
     if (pathHistory[i].moveType != 0) continue; // 只看前进记录
 
-    // 前进时两侧都 > 50cm 才算后方安全
+    // 前进时两侧都超过安全走廊阈值才算后方安全
     if (pathHistory[i].distL > SAFE_CORRIDOR_DIST &&
         pathHistory[i].distR > SAFE_CORRIDOR_DIST) {
-      return true;
+      safeSamples++;
     }
   }
-  return false;
+  return safeSamples >= 2;
 }
 
 void loop() {
@@ -429,6 +476,7 @@ void loop() {
   checkForCrashingHips();
 
   unsigned long currentMillis = millis();
+  bool sensorUpdated = false;
 
   // UART 停车自动恢复：5 秒内未收到 0x05 → 人员已离开 → 清除标志
   // ★ 修复：恢复 UART 停车前的状态，而不是盲目进入 FORWARD
@@ -442,22 +490,7 @@ void loop() {
       lastUartStopCmd = currentMillis;  // 续期，每 5 秒打印一次
       Serial.println(F("[RDK] CAMERA LOCKED - permanent stop, no auto-recovery"));
     }
-    // 热成像锁定 → 保持停止
-    else if (thermalStopLocked) {
-      uartStopActive = false;
-      lastUartStopCmd = 0;
-      currentState = STATE_THERMAL_STOP;
-      stateEndTime = currentMillis + 999999;
-      Serial.println(F("[RDK] Auto-recovery blocked - THERMAL LOCKED"));
-    }
-    // 恢复到 UART 停车前的状态
-    else if (preUartStopState == STATE_THERMAL_STOP) {
-      uartStopActive = false;
-      lastUartStopCmd = 0;
-      currentState = STATE_THERMAL_STOP;
-      stateEndTime = currentMillis + 999999;
-      Serial.println(F("[RDK] Auto-recovered -> THERMAL_STOP (target was acquired)"));
-    } else {
+    else {
       uartStopActive = false;
       lastUartStopCmd = 0;
       currentState = STATE_FORWARD;
@@ -478,11 +511,11 @@ void loop() {
   }
 
   // ========================================================
-  // 2. 定时感知层：每 100ms 读一次传感器，经滑动窗口滤波
+  // 2. 定时感知层：每 100ms 读一次传感器，经三点中值滤波
   //    【关键优化】：
   //    - pulseIn 超时 8ms（约 1.36m 探测范围）
   //    - 传感器间 delay 3ms
-  //    - 原始读数经 5 帧滑动平均滤波
+  //    - 原始读数经 3 帧中值滤波，并做连续帧确认
   //    - 单次传感器迭代阻塞 ~19ms
   // ========================================================
   if (currentMillis - lastSensorTime >= 100) {
@@ -494,86 +527,104 @@ void loop() {
 
     distL = filterDistanceL(rawL);
     distR = filterDistanceR(rawR);
+    sensorUpdated = true;
 
+    // 进入阈值与退出阈值分离（26/33cm），消除临界距离抖动。
+    if (distL < WARNING_DIST) {
+      if (obstacleConfirmL < OBSTACLE_CONFIRM_FRAMES) obstacleConfirmL++;
+    } else if (distL > OBSTACLE_CLEAR_DIST) {
+      obstacleConfirmL = 0;
+    }
+    if (distR < WARNING_DIST) {
+      if (obstacleConfirmR < OBSTACLE_CONFIRM_FRAMES) obstacleConfirmR++;
+    } else if (distR > OBSTACLE_CLEAR_DIST) {
+      obstacleConfirmR = 0;
+    }
+
+#ifdef DEBUG_OUTPUT
     Serial.print("L:"); Serial.print(distL);
     Serial.print(" | R:"); Serial.println(distR);
+#endif
 
     // ---- 热成像传感器读取（仅在热成像模式下） ----
     if (thermalMode && thermalSensorOK) {
-      readThermalPixels(thermalPixels);
-      thermalResult = detectHeatSource(thermalPixels);
-      lastThermalReadTime = currentMillis;
-
-      if (thermalResult.detected) {
-        Serial.print(F("THERM: Tmax=")); Serial.print(thermalResult.maxTemp, 1);
-        Serial.print(F("°C N=")); Serial.print(thermalResult.hotPixelCount);
-        Serial.print(F(" X=")); Serial.print(thermalResult.centerX);
-        Serial.print(F(" Dir=")); Serial.print(thermalResult.directionX);
-        Serial.print(F(" Cols=")); Serial.println(thermalResult.hotColumns);
+      // ★ 预热检查：传感器上电后需要3秒稳定，跳过预热期内的读数
+      if (!isThermalWarmedUp()) {
+        // 预热中，不读取
       } else {
-        Serial.println(F("THERM: No heat source"));
-      }
-    }
-  }
+        readThermalPixels(thermalPixels);
+        thermalResult = detectHeatSource(thermalPixels);
+        lastThermalReadTime = currentMillis;
 
-  // ========================================================
-  // 2.5 热成像模式手势切换检测
-  //     双手同时遮挡左右超声波 ≥2 秒 → 切换热成像模式
-  // ========================================================
-  {
-    bool bothCovered = (distL < DANGER_DIST && distR < DANGER_DIST);
-
-    if (bothCovered && thermalSensorOK) {
-      if (!thermalGestureArmed) {
-        thermalGestureStart = currentMillis;
-        thermalGestureArmed = true;
-      } else if (currentMillis - thermalGestureStart >= THERMAL_GESTURE_MS) {
-        // 手势触发：切换热成像模式
-        thermalGestureArmed = false; // 防止连续触发
-
-        if (thermalMode) {
-          // 当前 ON → 要关闭
-          // ★ 安全锁：已找到热源目标时，禁止手势关闭
-          if (currentState == STATE_THERMAL_STOP) {
-            // UNLOCK: gesture overrides thermal stop lock
-            thermalStopLocked = false;
-            thermalMode = false;
-            Serial.println(F(">> THERMAL: UNLOCKED - resuming navigation"));
-            beep(1000, 150);
-            delay(100);
-            beep(800, 150);
-            currentState = STATE_FORWARD;
-            stateEndTime = currentMillis;
-          }
-          else {
-            thermalMode = false;
-            Serial.println(F(">> THERMAL MODE: OFF (Normal Navigation)"));
-            beep(500, 200);
-            delay(100);
-            beep(400, 150);
-            currentState = STATE_FORWARD;
-            stateEndTime = currentMillis;
+        // ★ 噪声过滤：超过一半像素都是"热点"→ 传感器噪声，强制忽略
+        if (thermalResult.detected) {
+          float hotRatio = (float)thermalResult.hotPixelCount / (float)THERMAL_PIXELS;
+          if (hotRatio > THERMAL_MAX_HOT_RATIO) {
+            thermalResult.detected = false;
+            thermalConsecutiveDetect = 0;
+            if (thermalAlarmLatched &&
+                thermalClearConsecutive < THERMAL_REARM_CLEAR_FRAMES) {
+              thermalClearConsecutive++;
+              if (thermalClearConsecutive >= THERMAL_REARM_CLEAR_FRAMES) {
+                thermalAlarmLatched = false;
+                thermalClearConsecutive = 0;
+                Serial.println(F("THERMAL: REARMED"));
+              }
+            }
+#ifdef DEBUG_OUTPUT
+            Serial.print(F("THERM: NOISE "));
+            Serial.print(hotRatio * 100, 0);
+            Serial.println(F("% hot - ignoring"));
+#endif
+          } else {
+            thermalClearConsecutive = 0;
+            // 热成像独立累计确认帧，不读取或修改 RDK 停车状态。
+            if (!thermalAlarmLatched) {
+              thermalConsecutiveDetect++;
+              if (thermalConsecutiveDetect > THERMAL_CONSECUTIVE_DETECT)
+                thermalConsecutiveDetect = THERMAL_CONSECUTIVE_DETECT;
+            } else {
+              thermalConsecutiveDetect = 0;
+            }
           }
         } else {
-          // 当前 OFF → 要开启
-          thermalMode = true;
-          Serial.println(F(">> THERMAL MODE: ON (Search & Rescue)"));
-          beep(1000, 200);
-          delay(100);
-          beep(1200, 150);
-          // 进入热成像模式：保持当前运动状态，热成像引力层激活
+          // “连续”必须是真连续：任一无效帧立即清零，不能靠历史计数凑够。
+          thermalConsecutiveDetect = 0;
+          if (thermalAlarmLatched &&
+              thermalClearConsecutive < THERMAL_REARM_CLEAR_FRAMES) {
+            thermalClearConsecutive++;
+            if (thermalClearConsecutive >= THERMAL_REARM_CLEAR_FRAMES) {
+              thermalAlarmLatched = false;
+              thermalClearConsecutive = 0;
+              Serial.println(F("THERMAL: REARMED"));
+            }
+          }
         }
+
+#ifdef DEBUG_OUTPUT
+        if (thermalResult.detected) {
+          Serial.print(F("THERM: Tmax=")); Serial.print(thermalResult.maxTemp, 1);
+          Serial.print(F("°C N=")); Serial.print(thermalResult.hotPixelCount);
+          Serial.print(F(" X=")); Serial.print(thermalResult.centerX);
+          Serial.print(F(" Dir=")); Serial.print(thermalResult.directionX);
+          Serial.print(F(" Cols=")); Serial.print(thermalResult.hotColumns);
+          Serial.print(F(" dT=")); Serial.print(thermalResult.peakDelta, 1);
+          Serial.print(F(" C=")); Serial.println(thermalConsecutiveDetect);
+        } else {
+          Serial.println(F("THERM: No heat source"));
+        }
+#endif
       }
-    } else {
-      // 任一侧超声波未被遮挡 → 重置手势计时
-      thermalGestureArmed = false;
     }
   }
+
+  // pulseIn、热成像 I2C 和可选日志都会消耗时间；后续状态时限必须使用新时间。
+  currentMillis = millis();
 
   // ========================================================
   // 3. 方向感知记录：每次传感器读取后写入方向记忆
   // ========================================================
-  {
+  if (sensorUpdated) {
     byte moveType;
     switch (currentState) {
       case STATE_FORWARD:       moveType = 0; break;
@@ -584,7 +635,10 @@ void loop() {
       case STATE_TURN_RIGHT:    moveType = 3; break;
       default:                  moveType = 0; break;
     }
-    recordToMemory(distL, distR, moveType);
+    if (currentMillis - lastMemoryRecordTime >= 750) {
+      lastMemoryRecordTime = currentMillis;
+      recordToMemory(distL, distR, moveType);
+    }
 
     // 前进且前方畅通时，累计"安全走廊"时间
     if (currentState == STATE_FORWARD && distL > SAFE_CORRIDOR_DIST && distR > SAFE_CORRIDOR_DIST) {
@@ -600,10 +654,12 @@ void loop() {
   // ========================================================
   // 3.5 自动漂移补偿追踪：记录单侧遇障不对称性
   // ========================================================
-  if (currentState == STATE_FORWARD) {
-    if (distL < WARNING_DIST && distR >= WARNING_DIST) {
+  if (sensorUpdated && currentState == STATE_FORWARD) {
+    if (obstacleConfirmL >= OBSTACLE_CONFIRM_FRAMES &&
+        obstacleConfirmR < OBSTACLE_CONFIRM_FRAMES) {
       driftLeftCount++;   // 左侧遇障、右侧通畅 → 机器人可能偏左
-    } else if (distR < WARNING_DIST && distL >= WARNING_DIST) {
+    } else if (obstacleConfirmR >= OBSTACLE_CONFIRM_FRAMES &&
+               obstacleConfirmL < OBSTACLE_CONFIRM_FRAMES) {
       driftRightCount++;  // 右侧遇障、左侧通畅 → 机器人可能偏右
     }
   }
@@ -612,12 +668,14 @@ void loop() {
   if (currentMillis - lastDriftAdjustTime > 10000) {
     lastDriftAdjustTime = currentMillis;
     int diff = (int)driftLeftCount - (int)driftRightCount;
-    if (diff > 2) {
-      autoDriftCompensation = constrain(autoDriftCompensation + 2, -25, 25);
+    if (diff > 5) {
+      // 超声波只能反映哪侧更常遇障，不能直接测量航向；限制为小幅微调，
+      // 避免场地边界/障碍物把静态直行补偿推得过头。
+      autoDriftCompensation = constrain(autoDriftCompensation + 1, -1, 1);
       Serial.print(F("DRIFT: Left bias, comp="));
       Serial.println(autoDriftCompensation);
-    } else if (diff < -2) {
-      autoDriftCompensation = constrain(autoDriftCompensation - 2, -25, 25);
+    } else if (diff < -5) {
+      autoDriftCompensation = constrain(autoDriftCompensation - 1, -1, 1);
       Serial.print(F("DRIFT: Right bias, comp="));
       Serial.println(autoDriftCompensation);
     }
@@ -642,18 +700,38 @@ void loop() {
 
   // ========================================================
   // 5. 智能决策层（带方向感知的状态机）
-  //    热成像模式作为"引力层"叠加，不替代避障
+  //    RDK 锁定后跳过普通避障；热成像只在原地进行检测反馈
   // ========================================================
-  // THERMAL_LOCKED: skip state machine entirely
-  if (thermalStopLocked || cameraStopLocked) {
+  if (cameraStopLocked) {
     // locked - do nothing
   }
   else if (currentMillis >= stateEndTime) {
     previousState = currentState;  // 记录切换前的状态
+    bool leftObstacle = (obstacleConfirmL >= OBSTACLE_CONFIRM_FRAMES);
+    bool rightObstacle = (obstacleConfirmR >= OBSTACLE_CONFIRM_FRAMES);
+    bool immediateDanger = (distL < DANGER_DIST || distR < DANGER_DIST);
 
-    // ---- 逃脱模式优先 ----
-    if (obstacleStreak >= OBSTACLE_STREAK_MAX) {
-      // 卡死了！大角度转向寻找新出路
+#ifdef PERIODIC_SCAN
+    // 扫描只是低优先级探测动作；一旦确认障碍，立即交还给避障状态机。
+    if (scanInProgress && (leftObstacle || rightObstacle || immediateDanger)) {
+      scanInProgress = false;
+      scanStep = 0;
+      lastScanCheck = currentMillis;
+    }
+#endif
+
+    // ---- 紧急撤退第二阶段：直退完成后，再按已选安全方向转弯 ----
+    if (currentState == STATE_RETREAT_LEFT || currentState == STATE_RETREAT_RIGHT) {
+      bool turnLeftAfterBack = (currentState == STATE_RETREAT_LEFT);
+      currentState = turnLeftAfterBack ? STATE_TURN_LEFT : STATE_TURN_RIGHT;
+      stateEndTime = currentMillis + EMERGENCY_TURN_DURATION;
+      Serial.println(turnLeftAfterBack ?
+                     F(" -> Emergency phase 2: TURN LEFT") :
+                     F(" -> Emergency phase 2: TURN RIGHT"));
+    }
+    // ---- 逃脱模式 ----
+    else if (obstacleStreak >= OBSTACLE_STREAK_MAX) {
+      // 大角度转向寻找新出路
       Serial.println("!! [STUCK] Escape mode activated!");
       // 根据历史上的空旷方向决定逃脱转向
       int bias = computeRetreatBias();
@@ -669,41 +747,34 @@ void loop() {
       stateEndTime = currentMillis + ESCAPE_DURATION;
       obstacleStreak = 0; // 重置卡死计数
     }
-    // ---- 紧急贴脸：两侧都 < 25cm 或任一侧 < 15cm → 必须后退 ----
-    else if ((distL < WARNING_DIST && distR < WARNING_DIST) || distL < DANGER_DIST || distR < DANGER_DIST) {
+    // ---- 紧急贴脸：两侧均确认有障碍，或任一侧 < 20cm → 必须先后退 ----
+    else if ((leftObstacle && rightObstacle) || immediateDanger) {
       beep(800, 100);
       obstacleStreak++; // 累加卡死计数
 
-      // ★ 方向感知：根据记忆和历史决定撤退方向
-      retreatBias = computeRetreatBias();
-
-      if (retreatBias < 0 && distR > distL) {
-        // 左侧更空旷 → 向左后方撤退
-        currentState = STATE_RETREAT_LEFT;
-        Serial.println(" -> Retreat LEFT (left side historically safer)");
-      } else if (retreatBias > 0 && distL > distR) {
-        // 右侧更空旷 → 向右后方撤退
-        currentState = STATE_RETREAT_RIGHT;
-        Serial.println(" -> Retreat RIGHT (right side historically safer)");
-      } else if (isRearPathSafe()) {
-        // 后方路径安全 → 直退（原路返回最安全）
-        currentState = STATE_BACKWARD;
-        Serial.println(" -> Retreat STRAIGHT (rear path confirmed safe)");
+      // 先根据当前近距读数选“远离障碍”的转向：左边更近→后退后右转；
+      // 右边更近→后退后左转。两侧接近时才使用最近路径记忆。
+      const int sideMargin = 5;
+      if (distL + sideMargin < distR) {
+        retreatBias = 1;   // 左侧障碍更近，选择右转
+      } else if (distR + sideMargin < distL) {
+        retreatBias = -1;  // 右侧障碍更近，选择左转
       } else {
-        // 不确定，综合判断：哪边当前更空旷就偏哪边
-        if (distL > distR) {
-          currentState = STATE_RETREAT_LEFT;
-          Serial.println(" -> Retreat LEFT (left currently clearer)");
-        } else {
-          currentState = STATE_RETREAT_RIGHT;
-          Serial.println(" -> Retreat RIGHT (right currently clearer)");
-        }
+        retreatBias = computeRetreatBias();
+        if (retreatBias == 0) retreatBias = (obstacleStreak & 1) ? 1 : -1;
       }
+
+      // RETREAT_LEFT/RIGHT 在本版本只表示“直退后准备向哪边转”，
+      // 动作层在第一阶段一律执行纯直退，不再交替后退/转弯。
+      currentState = (retreatBias < 0) ? STATE_RETREAT_LEFT : STATE_RETREAT_RIGHT;
+      Serial.println(retreatBias < 0 ?
+                     F(" -> Emergency phase 1: BACKWARD, then LEFT") :
+                     F(" -> Emergency phase 1: BACKWARD, then RIGHT"));
       stateEndTime = currentMillis + RETREAT_DURATION;
       streakResetTime = currentMillis;
     }
     // ---- 仅左侧有障碍 → 右转 ----
-    else if (distL < WARNING_DIST) {
+    else if (leftObstacle) {
       obstacleStreak++;
       currentState = STATE_TURN_RIGHT;
       stateEndTime = currentMillis + TURN_DURATION;
@@ -711,7 +782,7 @@ void loop() {
       streakResetTime = currentMillis;
     }
     // ---- 仅右侧有障碍 → 左转 ----
-    else if (distR < WARNING_DIST) {
+    else if (rightObstacle) {
       obstacleStreak++;
       currentState = STATE_TURN_LEFT;
       stateEndTime = currentMillis + TURN_DURATION;
@@ -754,7 +825,7 @@ void loop() {
     // 触发新扫描（仅在两侧安全时，避免扫描干扰紧急避障）
     if (currentState == STATE_FORWARD && !scanInProgress &&
         (currentMillis - lastScanCheck > SCAN_CHECK_INTERVAL) &&
-        distL > WARNING_DIST && distR > WARNING_DIST) {
+        distL > OBSTACLE_CLEAR_DIST && distR > OBSTACLE_CLEAR_DIST) {
       scanInProgress = true;
       scanStep = 0;
       currentState = STATE_TURN_LEFT;
@@ -766,11 +837,11 @@ void loop() {
     // ========================================================
     // 6. Smart Interrupt：动作执行中持续监测
     // ========================================================
-    if ((currentState == STATE_TURN_RIGHT || currentState == STATE_TURN_LEFT ||
-         currentState == STATE_RETREAT_LEFT || currentState == STATE_RETREAT_RIGHT)) {
+    if (currentState == STATE_TURN_RIGHT || currentState == STATE_TURN_LEFT) {
 
       // 打断 1：两边都安全了 → 立刻恢复前进
-      if (distL > 35 && distR > 35) {
+      if (!scanInProgress &&
+          distL > OBSTACLE_CLEAR_DIST && distR > OBSTACLE_CLEAR_DIST) {
         Serial.println(" -> [Smart Jump] Path cleared! Forward!");
         currentState = STATE_FORWARD;
         stateEndTime = currentMillis;
@@ -778,16 +849,20 @@ void loop() {
       // 打断 2：突然出现近距离危险 → 紧急后退
       if (distL < DANGER_DIST || distR < DANGER_DIST) {
         Serial.println(" -> [Emergency] Danger close! Retreat!");
+#ifdef PERIODIC_SCAN
+        scanInProgress = false;
+        scanStep = 0;
+        lastScanCheck = currentMillis;
+#endif
         retreatBias = (distL > distR) ? -1 : 1;
         currentState = (retreatBias < 0) ? STATE_RETREAT_LEFT : STATE_RETREAT_RIGHT;
         stateEndTime = currentMillis + RETREAT_DURATION;
       }
     }
 
-    // 撤退过程中如果后方也检测到安全（前进时记忆的），可以缩短撤退时间
-    if ((currentState == STATE_RETREAT_LEFT || currentState == STATE_RETREAT_RIGHT ||
-         currentState == STATE_BACKWARD) &&
-        distL > 40 && distR > 40) {
+    // 普通直退状态可在前方重新畅通后提前结束；紧急两阶段撤退不可提前打断。
+    if (currentState == STATE_BACKWARD &&
+        distL > 35 && distR > 35) {
       // 撤退途中前方已经重新畅通，尽早停止撤退
       Serial.println(" -> [Early End] Retreat complete, path ahead clear");
       currentState = STATE_FORWARD;
@@ -796,75 +871,27 @@ void loop() {
   }
 
   // ========================================================
-  // 6.5 热成像引力叠加层（仅在热成像模式 + 传感器正常时激活）
-  //     核心原则：避障永远是最高优先级。
-  //     只在安全状态下，用热源方向"牵引"运动方向。
-  //     没有热源时，保留原有避障寻路行为，不会呆住。
+  // 6.5 热成像模式
+  //     与 RDK 完全独立：连续确认热源后只蜂鸣和输出，不改变机器人运动状态。
   // ========================================================
-  // THERMAL_LOCKED: skip all thermal guidance - servos frozen
-  if (thermalStopLocked || cameraStopLocked) {
-  }
-  else if (thermalMode && thermalSensorOK) {
-
-    // ---- 到达判定：多级阈值 + 超声波交叉验证 ----
-    // AMG8833 仅 8×8=64 像素，20 像素阈值在物理上无法触发（人在 1m 处仅占 8-16 像素）
-    // 修复：三级判断 + 超声波确认，确保在 1-2m 距离可靠停止
-    bool hotVeryClose = (thermalResult.hotPixelCount >= 8);     // Tier 1: 热源像素多 → ~1m
-    bool hotModClose  = (thermalResult.hotPixelCount >= 4       // Tier 2: 中等热源 + 多列
-                         && thermalResult.hotColumns >= 3);
-    bool hotBottom    = (thermalResult.centerY >= 5             // Tier 3: 热源在画面底部
-                         && thermalResult.hotPixelCount >= 3);   //         (底部=近处)
-    bool ultraConfirm = (thermalResult.detected                  // 超声波交叉验证
-                         && (distL < 50 || distR < 50));         // 热源 + 近距 = 确认有人
-
-    if (thermalResult.detected && (hotVeryClose || hotModClose || hotBottom || ultraConfirm)) {
-      if (currentState != STATE_THERMAL_STOP) {
-        Serial.println(F("THERM: *** TARGET REACHED! Stopping. ***"));
-        loudAlert(5);
-        currentState = STATE_THERMAL_STOP;
-        stateEndTime = currentMillis + 999999;
-        thermalStopLocked = true;   // HARD LOCK: no servo movement allowed
-      }
-    }
-    // ---- 热源接近但还没到：减速 + 温和微调转向 ----
-    else if (thermalResult.detected) {
-      // 紧急障碍物时避障优先，不覆盖
-      bool immediateDanger = (distL < DANGER_DIST || distR < DANGER_DIST);
-      bool isSafeToSteer = (currentState == STATE_FORWARD) && !immediateDanger;
-
-      if (isSafeToSteer) {
-        // 微转向：150ms（原 250ms 幅度过大），接近时更温和
-        const int microTurnMs = 150;
-        if (thermalResult.directionX == 0) {
-          currentState = STATE_FORWARD;
-          stateEndTime = currentMillis + 100;
-          Serial.println(F("THERM: HEAT CENTER, approach slow"));
-        } else if (thermalResult.directionX < 0) {
-          if (currentState != STATE_TURN_LEFT) {
-            currentState = STATE_TURN_LEFT;
-            stateEndTime = currentMillis + microTurnMs;
-            Serial.println(F("THERM: HEAT LEFT, micro-turn"));
-          }
-        } else {
-          if (currentState != STATE_TURN_RIGHT) {
-            currentState = STATE_TURN_RIGHT;
-            stateEndTime = currentMillis + microTurnMs;
-            Serial.println(F("THERM: HEAT RIGHT, micro-turn"));
-          }
-        }
-      }
-    }
-    // ---- 无热源：不干预，由周期性探头扫描(PERIODIC_SCAN)覆盖盲区 ----
-    //      热成像传感器有 60° 广角视野，前进时已能覆盖前方大部分区域
-    else {
-      // 自动扫描偏转已禁用，保持直行
-    }
+  if (thermalMode && !thermalAlarmLatched &&
+      thermalResult.detected &&
+      thermalConsecutiveDetect >= THERMAL_CONSECUTIVE_DETECT) {
+    thermalAlarmLatched = true;
+    thermalClearConsecutive = 0;
+    beep(2600, 350);
+    Serial.print(F("THERMAL: HEAT CONFIRMED Tmax="));
+    Serial.print(thermalResult.maxTemp, 1);
+    Serial.print(F("C dT="));
+    Serial.print(thermalResult.peakDelta, 1);
+    Serial.print(F(" N="));
+    Serial.println(thermalResult.hotPixelCount);
   }
 
   // ========================================================
-  // 6.6 停止状态最终保护门（THERMAL_STOP 和 UART STOP 均不可被其他状态覆盖）
+  // 6.6 停止状态最终保护门
   // ========================================================
-  if (currentState == STATE_THERMAL_STOP || currentState == STATE_STOP) {
+  if (currentState == STATE_STOP) {
     stateEndTime = currentMillis + 999999;
   }
 
@@ -873,8 +900,8 @@ void loop() {
   // ========================================================
   // uartStopActive 是独立布尔标志，仅在收到 0x05 时置位，仅在 5s 无 0x05 时清除
   // 此处是动作执行前的最后一道检查——即使前面任何代码修改了 currentState
-  // （状态机/热成像引导/PERIODIC_SCAN/Smart Interrupt），都会被强制覆盖
-  if (uartStopActive) {
+  // （状态机/热成像演示/PERIODIC_SCAN/Smart Interrupt），都会被强制覆盖
+  if (cameraStopLocked || uartStopActive) {
     currentState = STATE_STOP;
     stateEndTime = currentMillis + 999999;
   }
@@ -882,19 +909,45 @@ void loop() {
   // ========================================================
   // 7. 动作执行层
   // ========================================================
+  // 不同步态函数/周期都用全局时钟取模。若直接切换，新的相位可能抬起当前
+  // 唯一着地的三条腿，形成“六腿同时抬起”的瞬时趴下。运动配置变化前先让
+  // 六腿落地，并等待一个很短的稳定窗口。
+  int desiredMotionProfile = 0;
   switch (currentState) {
+    case STATE_FORWARD:
+      desiredMotionProfile = 1;
+      break;
+    case STATE_BACKWARD:      desiredMotionProfile = 3; break;
+    case STATE_TURN_LEFT:     desiredMotionProfile = 4; break;
+    case STATE_TURN_RIGHT:    desiredMotionProfile = 5; break;
+    case STATE_RETREAT_LEFT:  desiredMotionProfile = 6; break;
+    case STATE_RETREAT_RIGHT: desiredMotionProfile = 7; break;
+    case STATE_ESCAPE:        desiredMotionProfile = (retreatBias < 0) ? 8 : 9; break;
+    default:                  desiredMotionProfile = 0; break;
+  }
+
+  static int lastMotionProfile = -1;
+  static unsigned long gaitSettleUntil = 0;
+  if (desiredMotionProfile > 0 && desiredMotionProfile != lastMotionProfile) {
+    transactServos();
+    setLeg(ALL_LEGS, NOMOVE, KNEE_DOWN, 0);
+    commitServos();
+    gaitSettleUntil = millis() + GAIT_TRANSITION_SETTLE_MS;
+    lastMotionProfile = desiredMotionProfile;
+  } else if (desiredMotionProfile == 0) {
+    lastMotionProfile = 0;
+  }
+
+  if (desiredMotionProfile > 0 && (long)(millis() - gaitSettleUntil) < 0) {
+    // 保持六腿着地；下一轮再进入新步态。
+  } else switch (currentState) {
     case STATE_FORWARD:
     {
       int totalLean = DRIFT_COMPENSATION + autoDriftCompensation;
-      totalLean = constrain(totalLean, -40, 40);
-      // 热成像检测到热源 → 减速接近
-      if (thermalMode && thermalSensorOK && thermalResult.detected) {
-        gait_tripod(1, HIP_FORWARD, HIP_BACKWARD, KNEE_NEUTRAL, KNEE_DOWN,
-                    THERMAL_APPROACH_SPEED, totalLean);
-      } else {
-        gait_tripod(1, HIP_FORWARD, HIP_BACKWARD, KNEE_NEUTRAL, KNEE_DOWN,
-                    FORWARD_PERIOD, totalLean);
-      }
+      // 按实机标注确认前腿为LEG2/LEG3，基础165°；其余四腿160°。
+      totalLean = constrain(totalLean, -10, 10);
+      gait_tripod(1, HIP_FORWARD, HIP_BACKWARD, KNEE_NEUTRAL, KNEE_DOWN,
+                  FORWARD_PERIOD, totalLean);
       break;
     }
 
@@ -904,56 +957,33 @@ void loop() {
       break;
 
     case STATE_TURN_LEFT:
-      turn(0, HIP_FORWARD, HIP_BACKWARD, KNEE_NEUTRAL, KNEE_DOWN, 750);
-      break;
-
-    case STATE_TURN_RIGHT:
+      // turn() 参数是 ccw：1=逆时针/左转，0=顺时针/右转
       turn(1, HIP_FORWARD, HIP_BACKWARD, KNEE_NEUTRAL, KNEE_DOWN, 750);
       break;
 
-    case STATE_RETREAT_LEFT:
-      // 向左后方撤退：交替后退步态 + 左转（每 450ms 切换）
-      // 形成"后退曲线撤离"效果，比纯原地旋转更有效地远离障碍物
-      if ((currentMillis / 450) % 2 == 0) {
-        gait_tripod(0, HIP_FORWARD, HIP_BACKWARD, KNEE_NEUTRAL, KNEE_DOWN, 450, 0);
-      } else {
-        turn(0, HIP_FORWARD, HIP_BACKWARD, KNEE_NEUTRAL, KNEE_DOWN, 450);
-      }
+    case STATE_TURN_RIGHT:
+      turn(0, HIP_FORWARD, HIP_BACKWARD, KNEE_NEUTRAL, KNEE_DOWN, 750);
       break;
 
+    case STATE_RETREAT_LEFT:
     case STATE_RETREAT_RIGHT:
-      // 向右后方撤退：交替后退步态 + 右转
-      if ((currentMillis / 450) % 2 == 0) {
-        gait_tripod(0, HIP_FORWARD, HIP_BACKWARD, KNEE_NEUTRAL, KNEE_DOWN, 450, 0);
-      } else {
-        turn(1, HIP_FORWARD, HIP_BACKWARD, KNEE_NEUTRAL, KNEE_DOWN, 450);
-      }
+      // 第一阶段无论最终向哪边转，都只做完整直退。
+      gait_tripod(0, HIP_FORWARD, HIP_BACKWARD, KNEE_NEUTRAL, KNEE_DOWN, 700, 0);
       break;
 
     case STATE_ESCAPE:
       // 逃脱模式：大幅转向找到出路
       if (retreatBias < 0) {
-        turn(0, HIP_FORWARD, HIP_BACKWARD, KNEE_NEUTRAL, KNEE_DOWN, 600);
-      } else {
         turn(1, HIP_FORWARD, HIP_BACKWARD, KNEE_NEUTRAL, KNEE_DOWN, 600);
-      }
-      break;
-
-    // ---- 热成像模式：到达停止 ----
-    case STATE_THERMAL_STOP:
-      // 到达伤员位置，保持站立并周期性蜂鸣提示
-      stand();
-      {
-        unsigned long stopPhase = currentMillis % 3000;
-        if (stopPhase < 200) {
-          beep(3000, 200);  // 谐振点附近，更响亮
-        }
+      } else {
+        turn(0, HIP_FORWARD, HIP_BACKWARD, KNEE_NEUTRAL, KNEE_DOWN, 600);
       }
       break;
 
     case STATE_STOP:
       stand();  // UART 停车：原地站立
       break;
+
   }
 
   // RDK-X5 UART 持续轮询（D2 = HCRX, 115200 baud）
@@ -972,7 +1002,7 @@ void loop() {
           delayMicroseconds(9);
           if (PIND & 0x04) b |= (1 << i);
         }
-        // 快速处理，不在此处打印（Serial 阻塞 ~1ms/byte 会丢后续数据）
+        // 快速处理，不在此处打印
         if (b == 0x05) {
           gotStopCmd = true;
         }
@@ -983,7 +1013,7 @@ void loop() {
 
     // 窗口关闭后统一处理
     if (gotStopCmd) {
-      // ★ 保存 UART 停车前的状态，用于后续自动恢复
+      // 保存 UART 停车前的状态，用于后续自动恢复
       if (!uartStopActive) {
         preUartStopState = currentState;
       }
@@ -992,6 +1022,7 @@ void loop() {
       currentState = STATE_STOP;
       stateEndTime = millis() + 999999;
       lastUartStopCmd = millis();
+      stand();                  // 本轮动作已执行过，收到 RDK 指令后立即覆盖为站立停车
       beep(1200, 200);
     }
     // 打印所有收到的字节
