@@ -34,8 +34,8 @@
 #define SWI2C_SDA_MSK  (1 << (THERMAL_SDA_PIN))   // PD5 → bit 5
 #define SWI2C_SCL_MSK  (1 << (THERMAL_SCL_PIN))   // PD6 → bit 6
 
-// Half-bit timing (μs). 5 μs → ~100 kHz max, safe margin for AMG8833
-#define SWI2C_T  5
+// Half-bit timing (μs). 10 μs → ~50 kHz for reliable software I2C with AMG8833
+#define SWI2C_T  10
 
 static inline void swi2c_dly() { delayMicroseconds(SWI2C_T); }
 
@@ -155,16 +155,32 @@ static bool swi2c_probe(uint8_t addr7) {
 // Active I2C address — set by initThermal() after probing
 static uint8_t g_amg8833_addr = 0x69;  // default primary, may be overridden
 
+// Warm-up tracking: sensor needs time to stabilize after power-up
+static unsigned long g_thermalInitTime = 0;
+static bool g_thermalInitDone = false;
+
 // Write a single byte to an AMG8833 register
-static void amgWrite8(uint8_t reg, uint8_t value) {
+// Returns true if all three bytes (addr, reg, data) were ACK'd
+static bool amgWrite8(uint8_t reg, uint8_t value) {
   swi2c_start();
-  swi2c_write((g_amg8833_addr << 1) | 0);  // 7-bit addr + WRITE bit
-  swi2c_write(reg);
-  swi2c_write(value);
+  if (!swi2c_write((g_amg8833_addr << 1) | 0)) {  // 7-bit addr + WRITE bit
+    swi2c_stop();
+    return false;
+  }
+  if (!swi2c_write(reg)) {
+    swi2c_stop();
+    return false;
+  }
+  if (!swi2c_write(value)) {
+    swi2c_stop();
+    return false;
+  }
   swi2c_stop();
+  return true;
 }
 
 // Read a 16-bit signed value from two consecutive registers (LSB first)
+// NOTE: does NOT check ACK to avoid false failures from software I2C timing jitter
 static int16_t amgRead16(uint8_t reg) {
   swi2c_start();
   swi2c_write((g_amg8833_addr << 1) | 0);  // 7-bit addr + WRITE
@@ -257,12 +273,37 @@ bool initThermal() {
   amgWrite8(AMG8833_REG_FPS, 0x00);
   delay(50);
 
+  // ★ 启动诊断：读多个像素验证传感器是否返回不同的值
+  {
+    Serial.println(F("THERMAL: Init check - reading pixels 0,1,32,63:"));
+    for (int pi = 0; pi < THERMAL_PIXELS; pi++) {
+      if (pi == 0 || pi == 1 || pi == 32 || pi == 63) {
+        int16_t raw = amgRead16(AMG8833_REG_PIXEL_BASE + (pi * 2));
+        Serial.print(F("  pix["));
+        Serial.print(pi);
+        Serial.print(F("]="));
+        Serial.print(rawToCelsius(raw), 1);
+        Serial.print(F("°C (0x"));
+        Serial.print(raw, HEX);
+        Serial.println(F(")"));
+        delay(5);  // 像素间短暂延时
+      }
+    }
+  }
+
   Serial.println(F("THERMAL: AMG8833 initialized OK (software I2C)"));
+  g_thermalInitTime = millis();
+  g_thermalInitDone = true;
   return true;
 }
 
 bool isThermalConnected() {
   return swi2c_probe(g_amg8833_addr);
+}
+
+bool isThermalWarmedUp() {
+  if (!g_thermalInitDone) return false;
+  return (millis() - g_thermalInitTime) >= THERMAL_WARMUP_MS;
 }
 
 float readThermalPixel(uint8_t index) {
@@ -274,41 +315,13 @@ float readThermalPixel(uint8_t index) {
 }
 
 void readThermalPixels(float pixels[THERMAL_PIXELS]) {
-  // Read all 64 pixels sequentially.
-  // Software I2C has no 32-byte buffer limit, but reading in chunks
-  // keeps each transaction < 40 ms so servo timing isn't disturbed.
-  #define PIXELS_PER_CHUNK 16
-  #define BYTES_PER_CHUNK  (PIXELS_PER_CHUNK * 2)
-
-  for (int chunk = 0; chunk < THERMAL_PIXELS / PIXELS_PER_CHUNK; chunk++) {
-    uint8_t startReg = AMG8833_REG_PIXEL_BASE + (chunk * BYTES_PER_CHUNK);
-
-    // Send register address
-    swi2c_start();
-    swi2c_write((g_amg8833_addr << 1) | 0);
-    swi2c_write(startReg);
-
-    // Repeated START for read
-    swi2c_start();
-    swi2c_write((g_amg8833_addr << 1) | 1);
-
-    // Read PIXELS_PER_CHUNK pixels (2 bytes each).
-    // Send ACK after every byte except the very last one (hi of last pixel).
-    for (int i = 0; i < PIXELS_PER_CHUNK; i++) {
-      bool isLastPixel = (i == PIXELS_PER_CHUNK - 1);
-      uint8_t lo = swi2c_read(false);           // ACK
-      uint8_t hi = swi2c_read(isLastPixel);     // NACK only on last byte
-
-      int16_t raw = (int16_t)(((uint16_t)hi << 8) | lo);
-      if (raw & 0x0800) {
-        raw |= 0xF000;
-      }
-
-      int pixelIdx = chunk * PIXELS_PER_CHUNK + i;
-      pixels[pixelIdx] = rawToCelsius(raw);
-    }
-
-    swi2c_stop();
+  // ★ 逐像素单独读取（不使用连续/批量 auto-increment 模式）
+  //   每个像素独立发起 I2C 事务：START→写寄存器地址→RESTART→读2字节→STOP
+  for (int i = 0; i < THERMAL_PIXELS; i++) {
+    uint8_t reg = AMG8833_REG_PIXEL_BASE + (i * 2);
+    int16_t raw = amgRead16(reg);
+    pixels[i] = rawToCelsius(raw);
+    delayMicroseconds(200);  // 像素间短暂延时，让传感器内部 ADC 稳定
   }
 }
 
@@ -317,6 +330,8 @@ HeatSourceResult detectHeatSource(float pixels[THERMAL_PIXELS]) {
   result.detected = false;
   result.maxTemp = -100.0f;
   result.avgTemp = 0.0f;
+  result.backgroundTemp = 0.0f;
+  result.peakDelta = 0.0f;
   result.centerX = 3;  // default center
   result.centerY = 3;
   result.hotPixelCount = 0;
@@ -324,61 +339,137 @@ HeatSourceResult detectHeatSource(float pixels[THERMAL_PIXELS]) {
   result.directionX = 0;
   result.directionY = 0;
 
-  float sumTemp = 0.0f;
-  float weightedX = 0.0f;
-  float weightedY = 0.0f;
-  bool colHasHot[THERMAL_COLS] = {false};
+  // 第一遍求全帧均值，同时拒绝断线/总线错误造成的不合理温度。
+  float sumAll = 0.0f;
+  int validCount = 0;
+  for (int i = 0; i < THERMAL_PIXELS; i++) {
+    if (pixels[i] > -20.0f && pixels[i] < 100.0f) {
+      sumAll += pixels[i];
+      validCount++;
+    }
+  }
+  if (validCount < 60) return result;
 
-  // Scan all 64 pixels for human-temperature heat signatures
-  for (int row = 0; row < THERMAL_ROWS; row++) {
-    for (int col = 0; col < THERMAL_COLS; col++) {
-      int idx = row * THERMAL_COLS + col;
-      float temp = pixels[idx];
+  float meanTemp = sumAll / (float)validCount;
 
-      // Track global maximum temperature
-      if (temp > result.maxTemp) {
-        result.maxTemp = temp;
-      }
+  // 用“不高于均值”的像素再次估计背景。相比全帧均值，它不会被画面中的人体
+  // 大幅抬高；相比最低温度，它又不容易受单个冷坏点影响。
+  float backgroundSum = 0.0f;
+  int backgroundCount = 0;
+  for (int i = 0; i < THERMAL_PIXELS; i++) {
+    if (pixels[i] > -20.0f && pixels[i] <= meanTemp) {
+      backgroundSum += pixels[i];
+      backgroundCount++;
+    }
+  }
+  if (backgroundCount == 0) return result;
+  result.backgroundTemp = backgroundSum / (float)backgroundCount;
 
-      // Check if this pixel falls in human body temperature range
-      if (temp >= HUMAN_TEMP_MIN && temp <= HUMAN_TEMP_MAX) {
-        result.hotPixelCount++;
-        sumTemp += temp;
-        colHasHot[col] = true;
+  float effectiveMin = HUMAN_TEMP_MIN;
+  float adaptiveMin = result.backgroundTemp + THERMAL_BACKGROUND_DELTA;
+  if (adaptiveMin > effectiveMin) {
+    effectiveMin = adaptiveMin;
+  }
 
-        // Weighted centroid: closer pixels (higher temp) have more weight
-        float weight = temp - (HUMAN_TEMP_MIN - 2.0f);
-        weightedX += (float)col * weight;
-        weightedY += (float)row * weight;
-      }
+  // 只保留最大的四连通热斑。旧算法把互不相邻的热噪点全部相加，两个孤立点
+  // 就会被当成人体，而且散落在多列的噪点会被误判为“已经很近”。
+  // 8x8掩码压成两个64位位图。旧版两个bool[64]占128字节栈，
+  // 在ATmega328P的2KB SRAM上与队列、浮点运算叠加后可能破坏返回地址。
+  uint64_t hotMask = 0;
+  uint64_t visited = 0;
+  for (int i = 0; i < THERMAL_PIXELS; i++) {
+    float temp = pixels[i];
+    if (temp > result.maxTemp) result.maxTemp = temp;
+    if (temp >= effectiveMin && temp <= HUMAN_TEMP_MAX) {
+      hotMask |= (UINT64_C(1) << i);
     }
   }
 
-  // Count how many unique columns contain at least one hot pixel
-  for (int c = 0; c < THERMAL_COLS; c++) {
-    if (colHasHot[c]) result.hotColumns++;
+  int bestCount = 0;
+  float bestSumTemp = 0.0f;
+  float bestWeightedX = 0.0f;
+  float bestWeightedY = 0.0f;
+  float bestTotalWeight = 0.0f;
+  float bestPeak = -100.0f;
+  byte bestColMask = 0;
+
+  for (int start = 0; start < THERMAL_PIXELS; start++) {
+    uint64_t startBit = (UINT64_C(1) << start);
+    if (!(hotMask & startBit) || (visited & startBit)) continue;
+
+    uint8_t queue[THERMAL_PIXELS];
+    int head = 0;
+    int tail = 0;
+    queue[tail++] = (uint8_t)start;
+    visited |= startBit;
+
+    int count = 0;
+    float sumTemp = 0.0f;
+    float weightedX = 0.0f;
+    float weightedY = 0.0f;
+    float totalWeight = 0.0f;
+    float peak = -100.0f;
+    byte colMask = 0;
+
+    while (head < tail) {
+      int idx = queue[head++];
+      int row = idx / THERMAL_COLS;
+      int col = idx % THERMAL_COLS;
+      float temp = pixels[idx];
+      float weight = temp - result.backgroundTemp;
+      if (weight < 0.25f) weight = 0.25f;
+
+      count++;
+      sumTemp += temp;
+      weightedX += (float)col * weight;
+      weightedY += (float)row * weight;
+      totalWeight += weight;
+      if (temp > peak) peak = temp;
+      colMask |= (byte)(1 << col);
+
+      int neighbors[4] = {idx - THERMAL_COLS, idx + THERMAL_COLS, idx - 1, idx + 1};
+      for (int n = 0; n < 4; n++) {
+        int next = neighbors[n];
+        if (next < 0 || next >= THERMAL_PIXELS) continue;
+        if ((n == 2 || n == 3) && (next / THERMAL_COLS != row)) continue;
+        uint64_t nextBit = (UINT64_C(1) << next);
+        if ((hotMask & nextBit) && !(visited & nextBit)) {
+          visited |= nextBit;
+          queue[tail++] = (uint8_t)next;
+        }
+      }
+    }
+
+    if (count > bestCount || (count == bestCount && peak > bestPeak)) {
+      bestCount = count;
+      bestSumTemp = sumTemp;
+      bestWeightedX = weightedX;
+      bestWeightedY = weightedY;
+      bestTotalWeight = totalWeight;
+      bestPeak = peak;
+      bestColMask = colMask;
+    }
   }
 
-  // Determine if we have a valid heat source
-  // Require at least 2 hot pixels to avoid noise
-  if (result.hotPixelCount >= 2) {
+  result.peakDelta = bestPeak - result.backgroundTemp;
+  if (bestCount >= THERMAL_MIN_BLOB_PIXELS &&
+      result.peakDelta >= THERMAL_MIN_PEAK_DELTA) {
     result.detected = true;
+    result.hotPixelCount = bestCount;
+    result.avgTemp = bestSumTemp / (float)bestCount;
+    result.maxTemp = bestPeak;
 
-    // Calculate weighted center of hot region
-    float totalWeight = sumTemp - (result.hotPixelCount * (HUMAN_TEMP_MIN - 2.0f));
-    if (totalWeight > 0.0f) {
-      result.centerX = (int)(weightedX / totalWeight + 0.5f);
-      result.centerY = (int)(weightedY / totalWeight + 0.5f);
-    } else {
-      // Fallback: geometric center of hot pixels
-      result.centerX = 3;
-      result.centerY = 3;
+    for (int c = 0; c < THERMAL_COLS; c++) {
+      if (bestColMask & (1 << c)) result.hotColumns++;
+    }
+
+    if (bestTotalWeight > 0.0f) {
+      result.centerX = (int)(bestWeightedX / bestTotalWeight + 0.5f);
+      result.centerY = (int)(bestWeightedY / bestTotalWeight + 0.5f);
     }
 
     result.centerX = constrain(result.centerX, 0, 7);
     result.centerY = constrain(result.centerY, 0, 7);
-    result.avgTemp = sumTemp / (float)result.hotPixelCount;
-
     // Map center to direction hints
     result.directionX = getHeatDirectionX(result.centerX);
 
